@@ -40,8 +40,24 @@ def set_scenario(name):
     if name not in valid:
         return jsonify({"error": "Unknown scenario"}), 400
     sim.set_scenario(name)
+    state = sim.get_state()
     socketio.emit("scenario_changed", {"scenario": name})
-    return jsonify({"ok": True, "scenario": name})
+    socketio.emit("state", state)
+    return jsonify({"ok": True, "scenario": name, "state": state})
+
+
+@app.route("/api/optimize", methods=["POST"])
+def optimize_placement():
+    sim.optimize_placement()
+    state = sim.get_state()
+    socketio.emit("optimization_completed", {"ok": True})
+    socketio.emit("state", state)
+    return jsonify({"ok": True, "state": state})
+
+
+@app.route("/api/wms")
+def get_wms():
+    return jsonify(sim.wms.to_dict())
 
 
 # ─── WebSocket ─────────────────────────────────────────────────────
@@ -54,6 +70,13 @@ def on_connect():
 @socketio.on("set_scenario")
 def on_set_scenario(data):
     sim.set_scenario(data.get("scenario", "normal"))
+    socketio.emit("state", sim.get_state())
+
+
+@socketio.on("optimize")
+def on_optimize(data):
+    sim.optimize_placement()
+    socketio.emit("state", sim.get_state())
 
 
 # ─── Background simulation loop ────────────────────────────────────

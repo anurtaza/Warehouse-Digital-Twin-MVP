@@ -6,22 +6,36 @@ import MetricsBar from "./components/MetricsBar";
 import EventLog from "./components/EventLog";
 import ScenarioPanel from "./components/ScenarioPanel";
 import ThroughputChart from "./components/ThroughputChart";
+import InsightsPanel from "./components/InsightsPanel";
+import WmsPanel from "./components/WmsPanel";
+import RolePanel from "./components/RolePanel";
+import RoleSummaryPanel from "./components/RoleSummaryPanel";
+import ScenarioAnalysisPanel from "./components/ScenarioAnalysisPanel";
+import ReportPanel from "./components/ReportPanel";
 import "./App.css";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL || "/api";
 
 export default function App() {
   const mountRef = useRef(null);
   const sceneRef = useRef({});
   const [metrics, setMetrics] = useState(null);
+  const [insights, setInsights] = useState(null);
+  const [analysis, setAnalysis] = useState([]);
+  const [report, setReport] = useState(null);
+  const [wms, setWms] = useState(null);
   const [events, setEvents] = useState([]);
   const [scenario, setScenarioState] = useState("normal");
+  const [role, setRole] = useState("manager");
   const [connected, setConnected] = useState(false);
+  const [tooltip, setTooltip] = useState(null);
   const socketRef = useRef(null);
+  const raycasterRef = useRef(new THREE.Raycaster());
+  const pointerRef = useRef(new THREE.Vector2());
 
   // ── WebSocket connection ──────────────────────────────────────
   useEffect(() => {
-    const socket = io(API, { transports: ["websocket"] });
+    const socket = io({ transports: ["websocket"], path: "/socket.io" });
     socketRef.current = socket;
 
     socket.on("connect", () => setConnected(true));
@@ -29,6 +43,10 @@ export default function App() {
 
     socket.on("state", (data) => {
       setMetrics(data.metrics);
+      setInsights(data.insights);
+      setAnalysis(data.analysis);
+      setReport(data.report);
+      setWms(data.wms);
       setScenarioState(data.scenario);
       updateScene(data);
     });
@@ -36,6 +54,24 @@ export default function App() {
     socket.on("event", (ev) => {
       setEvents((prev) => [ev, ...prev].slice(0, 60));
     });
+
+    fetch(`${API}/state`)
+      .then((res) => res.json())
+      .then((data) => {
+        setMetrics(data.metrics);
+        setInsights(data.insights);
+        setAnalysis(data.analysis);
+        setReport(data.report);
+        setWms(data.wms);
+        setScenarioState(data.scenario);
+        updateScene(data);
+      })
+      .catch(() => {});
+
+    fetch(`${API}/events`)
+      .then((res) => res.json())
+      .then((data) => setEvents(data))
+      .catch(() => {});
 
     return () => socket.disconnect();
   }, []);
@@ -106,7 +142,60 @@ export default function App() {
     makePlane(0x8e44ad, 5, 5, 14, 0);   // shipping
     makePlane(0x27ae60, 4, 4, -14, 0);  // receiving
 
-    sceneRef.current = { scene, renderer, camera, controls, cellMeshes: {}, agvMeshes: [] };
+    // Optional rack markers are removed to keep the warehouse open and show aisles clearly.
+    const buildRacks = () => {
+      // No heavy partition walls here; the cell pallets define the rack geometry.
+    };
+    buildRacks();
+
+    sceneRef.current = {
+      scene,
+      renderer,
+      camera,
+      controls,
+      cellMeshes: {},
+      palletMeshes: {},
+      agvMeshes: {},
+      routeLines: {},
+    };
+
+    const onPointerMove = (event) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycasterRef.current.setFromCamera(pointerRef.current, camera);
+
+      const cellObjects = Object.values(sceneRef.current.cellMeshes);
+      const agvObjects = Object.values(sceneRef.current.agvMeshes).map((item) => item.group);
+      const intersects = raycasterRef.current.intersectObjects([...cellObjects, ...agvObjects], true);
+
+      if (intersects.length > 0) {
+        const target = intersects[0].object.userData || intersects[0].object.parent?.userData;
+        if (target?.type === "cell") {
+          const cell = target.data;
+          setTooltip({
+            title: cell.id,
+            details: `SKU: ${cell.sku || "—"} · Кол-во: ${cell.qty} · ${cell.hot ? "Горячая зона" : cell.fill ? "Заполнена" : "Свободна"}`,
+            x: event.clientX,
+            y: event.clientY,
+          });
+          return;
+        }
+        if (target?.type === "agv") {
+          const agv = target.data;
+          setTooltip({
+            title: agv.id,
+            details: `Батарея: ${agv.battery}% · Цель: ${agv.tx}, ${agv.tz}`,
+            x: event.clientX,
+            y: event.clientY,
+          });
+          return;
+        }
+      }
+      setTooltip(null);
+    };
+
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
 
     // Resize
     const onResize = () => {
@@ -123,13 +212,20 @@ export default function App() {
       raf = requestAnimationFrame(animate);
       controls.update();
       const { agvMeshes } = sceneRef.current;
-      agvMeshes.forEach(({ group, data }) => {
-        const dx = data.tx - group.position.x;
-        const dz = data.tz - group.position.z;
+      Object.values(agvMeshes).forEach((entry) => {
+        const { group, path } = entry;
+        if (!path || path.length < 2) return;
+
+        const targetPoint = path[entry.pathIndex || 1];
+        const dx = targetPoint.x - group.position.x;
+        const dz = targetPoint.z - group.position.z;
         const dist = Math.hypot(dx, dz);
-        if (dist > 0.1) {
-          group.position.x += (dx / dist) * 0.12;
-          group.position.z += (dz / dist) * 0.12;
+        const speed = 0.14;
+        if (dist < 0.08) {
+          entry.pathIndex = Math.min((entry.pathIndex || 1) + 1, path.length - 1);
+        } else {
+          group.position.x += (dx / dist) * speed;
+          group.position.z += (dz / dist) * speed;
           group.rotation.y = Math.atan2(dx, dz);
         }
       });
@@ -139,6 +235,7 @@ export default function App() {
 
     return () => {
       cancelAnimationFrame(raf);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("resize", onResize);
       renderer.dispose();
       el.removeChild(renderer.domElement);
@@ -147,7 +244,7 @@ export default function App() {
 
   // ── Update 3D scene from WS data ─────────────────────────────
   const updateScene = useCallback((data) => {
-    const { scene, cellMeshes, agvMeshes } = sceneRef.current;
+    const { scene, cellMeshes, palletMeshes, agvMeshes, routeLines } = sceneRef.current;
     if (!scene) return;
 
     const COLS = 10, ROWS = 6, SHELVES = 4;
@@ -156,7 +253,7 @@ export default function App() {
     const OX = -(COLS * (CW + GAP_X)) / 2 + CW / 2;
     const OZ = -(ROWS * (CD + GAP_Z)) / 2 + CD / 2;
 
-    const COLORS = { free: 0x2a7a3b, full: 0x1a5fa5, hot: 0xc0392b };
+    const COLORS = { empty: 0x233142, full: 0x1a5fa5, hot: 0xc0392b };
 
     // Update / create cell boxes
     data.cells.forEach((cell) => {
@@ -166,73 +263,238 @@ export default function App() {
       const bz = OZ + cell.row * (CD + GAP_Z);
 
       if (!cellMeshes[key]) {
+        const material = new THREE.MeshStandardMaterial({ color: COLORS.empty, transparent: true, opacity: 0.18, roughness: 0.6 });
         const mesh = new THREE.Mesh(
           new THREE.BoxGeometry(CW - 0.15, CH - 0.1, CD - 0.15),
-          new THREE.MeshLambertMaterial({ color: COLORS.free })
+          material
         );
         mesh.castShadow = true;
+        mesh.userData = { type: "cell", data: cell };
         scene.add(mesh);
         cellMeshes[key] = mesh;
 
-        // Shelf frame (created once)
-        if (cell.shelf === 0) {
-          const frame = new THREE.Mesh(
-            new THREE.BoxGeometry(CW + 0.1, SHELVES * CH + 0.4, CD + 0.1),
-            new THREE.MeshLambertMaterial({ color: 0x3a4a5a })
-          );
-          frame.position.set(bx, (SHELVES * CH) / 2, bz);
-          frame.castShadow = true;
-          scene.add(frame);
-        }
+        const pallet = new THREE.Mesh(
+          new THREE.BoxGeometry(CW - 0.4, 0.22, CD - 0.4),
+          new THREE.MeshStandardMaterial({ color: 0x8d6e63, roughness: 0.7, metalness: 0.1 })
+        );
+        pallet.position.set(bx, by + 0.28, bz);
+        pallet.castShadow = true;
+        pallet.visible = false;
+        scene.add(pallet);
+        palletMeshes[key] = pallet;
       }
 
       const mesh = cellMeshes[key];
+      const pallet = palletMeshes[key];
       mesh.position.set(bx, by, bz);
-      mesh.visible = cell.fill;
-      mesh.material.color.setHex(cell.hot ? COLORS.hot : COLORS.full);
-    });
+      mesh.visible = true;
+      mesh.material.color.setHex(cell.fill ? (cell.hot ? COLORS.hot : COLORS.full) : COLORS.empty);
+      mesh.material.opacity = cell.fill ? 1 : 0.18;
+      mesh.userData.data = cell;
 
-    // Update AGVs
-    agvMeshes.forEach(({ group }) => scene.remove(group));
-    agvMeshes.length = 0;
+      pallet.position.set(bx, by + 0.28, bz);
+      pallet.visible = cell.fill;
+      pallet.material.color.setHex(cell.hot ? 0xe74c3c : 0x8d6e63);
+    });
 
     const TOTAL_W = COLS * (CW + GAP_X);
     const TOTAL_D = ROWS * (CD + GAP_Z);
+    const currentIds = new Set(data.agvs.map((a) => a.id));
+
+    Object.keys(agvMeshes).forEach((id) => {
+      if (!currentIds.has(id)) {
+        scene.remove(agvMeshes[id].group);
+        scene.remove(agvMeshes[id].routeLine);
+        delete agvMeshes[id];
+      }
+    });
+
+    const buildAisleLines = (OX, OZ, CW, CD, GAP_X, GAP_Z) => {
+      const corridorXs = [];
+      const corridorZs = [];
+      for (let i = 0; i < COLS - 1; i++) {
+        corridorXs.push(OX + (i + 0.5) * (CW + GAP_X));
+      }
+      for (let i = 0; i < ROWS - 1; i++) {
+        corridorZs.push(OZ + (i + 0.5) * (CD + GAP_Z));
+      }
+      return { corridorXs, corridorZs };
+    };
+
+    const chooseClosest = (value, list) => {
+      return list.reduce((best, current) => Math.abs(current - value) < Math.abs(best - value) ? current : best, list[0]);
+    };
+
+    const buildAislePath = (start, target) => {
+      const { corridorXs, corridorZs } = buildAisleLines(OX, OZ, CW, CD, GAP_X, GAP_Z);
+      const nearest = (value, list) => list.reduce((best, current) => Math.abs(current - value) < Math.abs(best - value) ? current : best, list[0]);
+      const startCorridorX = nearest(start.x, corridorXs);
+      const startCorridorZ = nearest(start.z, corridorZs);
+      const targetCorridorX = nearest(target.x, corridorXs);
+      const targetCorridorZ = nearest(target.z, corridorZs);
+
+      const path = [new THREE.Vector3(start.x, start.y, start.z)];
+      const addPoint = (x, y, z) => {
+        const last = path[path.length - 1];
+        if (Math.abs(last.x - x) > 0.01 || Math.abs(last.z - z) > 0.01) {
+          path.push(new THREE.Vector3(x, y, z));
+        }
+      };
+
+      // 1) Выход на ближайший коридор
+      const dxToX = Math.abs(start.x - startCorridorX);
+      const dzToZ = Math.abs(start.z - startCorridorZ);
+      if (dxToX <= dzToZ) {
+        addPoint(startCorridorX, start.y, start.z);
+      } else {
+        addPoint(start.x, start.y, startCorridorZ);
+      }
+
+      // 2) Движение по X/Z внутри склада: перейти на пересечение коридоров
+      const current = path[path.length - 1];
+      const onXcorridor = Math.abs(current.x - startCorridorX) < 0.01;
+      const onZcorridor = Math.abs(current.z - startCorridorZ) < 0.01;
+
+      if (onXcorridor) {
+        addPoint(current.x, start.y, targetCorridorZ);
+        addPoint(targetCorridorX, start.y, targetCorridorZ);
+      } else if (onZcorridor) {
+        addPoint(targetCorridorX, start.y, current.z);
+        addPoint(targetCorridorX, start.y, targetCorridorZ);
+      }
+
+      // 3) Вход в целевую ячейку
+      addPoint(target.x, start.y, target.z);
+      return path;
+    };
 
     data.agvs.forEach((agv) => {
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.9, 0.35, 0.7),
-        new THREE.MeshLambertMaterial({ color: 0xe67e22 })
-      );
-      const mast = new THREE.Mesh(
-        new THREE.BoxGeometry(0.12, 1.4, 0.12),
-        new THREE.MeshLambertMaterial({ color: 0xf39c12 })
-      );
-      mast.position.set(0.3, 0.88, 0);
-      const fork = new THREE.Mesh(
-        new THREE.BoxGeometry(0.6, 0.06, 0.08),
-        new THREE.MeshLambertMaterial({ color: 0xd35400 })
-      );
-      fork.position.set(0.6, 0.2, 0);
+      const key = agv.id;
+      const worldX = OX + agv.x * (CW + GAP_X);
+      const worldZ = OZ + agv.z * (CD + GAP_Z);
+      const targetX = OX + agv.tx * (CW + GAP_X);
+      const targetZ = OZ + agv.tz * (CD + GAP_Z);
+      const batteryColor = agv.battery < 30 ? 0xc0392b : agv.battery < 60 ? 0xf39c12 : 0x27ae60;
 
-      const group = new THREE.Group();
-      group.add(body, mast, fork);
-      group.position.set(
-        agv.x - TOTAL_W / 2 + (CW + GAP_X) / 2,
-        0.18,
-        agv.z - TOTAL_D / 2 + (CD + GAP_Z) / 2
-      );
-      scene.add(group);
-      agvMeshes.push({ group, data: { tx: agv.tx - TOTAL_W / 2, tz: agv.tz - TOTAL_D / 2 } });
+      let entry = agvMeshes[key];
+      const startPos = entry ? entry.group.position.clone() : new THREE.Vector3(worldX, 0.18, worldZ);
+      const targetPos = new THREE.Vector3(targetX, 0.18, targetZ);
+      const path = buildAislePath(startPos, targetPos);
+
+      if (!entry) {
+        const body = new THREE.Mesh(
+          new THREE.BoxGeometry(0.9, 0.22, 0.62),
+          new THREE.MeshStandardMaterial({ color: batteryColor, roughness: 0.35, metalness: 0.5 })
+        );
+        body.position.set(0, 0.16, 0);
+
+        const platform = new THREE.Mesh(
+          new THREE.BoxGeometry(0.85, 0.08, 0.6),
+          new THREE.MeshStandardMaterial({ color: 0x1e2f3c, roughness: 0.6, metalness: 0.3 })
+        );
+        platform.position.set(0, 0.06, 0);
+
+        const cabin = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45, 0.18, 0.42),
+          new THREE.MeshStandardMaterial({ color: 0x34495e, roughness: 0.5, metalness: 0.25 })
+        );
+        cabin.position.set(-0.05, 0.24, 0);
+
+        const light = new THREE.Mesh(
+          new THREE.SphereGeometry(0.07, 10, 8),
+          new THREE.MeshStandardMaterial({ color: 0x7fffd4, emissive: 0x7fffd4, emissiveIntensity: 0.65 })
+        );
+        light.position.set(0.34, 0.18, 0);
+
+        const wheelMesh = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.4, metalness: 0.7 });
+        const makeWheel = (x, z) => {
+          const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.14, 12), wheelMesh);
+          wheel.rotation.z = Math.PI / 2;
+          wheel.position.set(x, 0.06, z);
+          return wheel;
+        };
+
+        const group = new THREE.Group();
+        group.userData = { type: "agv", data: { ...agv, worldTx: targetX, worldTz: targetZ } };
+        group.add(body, platform, cabin, light,
+          makeWheel(0.3, 0.28),
+          makeWheel(-0.3, 0.28),
+          makeWheel(0.3, -0.28),
+          makeWheel(-0.3, -0.28)
+        );
+        group.position.copy(startPos);
+        scene.add(group);
+
+        const routeLine = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(path),
+          new THREE.LineDashedMaterial({ color: 0x57c7ff, dashSize: 0.4, gapSize: 0.2, transparent: true, opacity: 0.7 })
+        );
+        routeLine.computeLineDistances();
+        scene.add(routeLine);
+
+        entry = { group, routeLine, path, pathIndex: 1 };
+        agvMeshes[key] = entry;
+      } else {
+        const distance = entry.group.position.distanceTo(startPos);
+        if (distance > 1.5) {
+          entry.group.position.copy(startPos);
+        }
+        entry.group.rotation.y = Math.atan2(targetX - entry.group.position.x, targetZ - entry.group.position.z);
+        entry.group.userData.data = { ...agv, worldTx: targetX, worldTz: targetZ };
+        entry.group.children[0].material.color.setHex(batteryColor);
+        entry.path = path;
+        entry.pathIndex = Math.min(entry.pathIndex || 1, entry.path.length - 1);
+        entry.routeLine.geometry.setFromPoints(path);
+        entry.routeLine.computeLineDistances();
+      }
     });
 
     sceneRef.current.cellMeshes = cellMeshes;
+    sceneRef.current.palletMeshes = palletMeshes;
     sceneRef.current.agvMeshes = agvMeshes;
+    sceneRef.current.routeLines = routeLines;
   }, []);
 
   // ── Scenario control ──────────────────────────────────────────
   const applyScenario = (name) => {
-    fetch(`${API}/api/scenario/${name}`, { method: "POST" });
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("set_scenario", { scenario: name });
+    } else {
+      fetch(`${API}/scenario/${name}`, { method: "POST" });
+    }
+  };
+  const exportReport = () => {
+    const payload = report && metrics ? {
+      report,
+      metrics,
+      scenario,
+      generated_at: report?.generated_at,
+    } : null;
+    if (!payload) return;
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `warehouse-report-${new Date().toISOString().slice(0,10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  const optimizePlacement = () => {
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit("optimize", {});
+      return;
+    }
+    fetch(`${API}/optimize`, { method: "POST" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.state) {
+          setMetrics(data.state.metrics);
+          setInsights(data.state.insights);
+          setWms(data.state.wms);
+          updateScene(data.state);
+        }
+      })
+      .catch(() => {});
   };
 
   return (
@@ -250,15 +512,33 @@ export default function App() {
         </div>
 
         {metrics && <MetricsBar metrics={metrics} />}
+        <RolePanel role={role} onSelect={setRole} />
+        <RoleSummaryPanel role={role} metrics={metrics} insights={insights} wms={wms} />
+        {report && <ReportPanel report={report} onExport={exportReport} />}
+        {insights && <InsightsPanel insights={insights} />}
+        {wms && <WmsPanel wms={wms} />}
+
+        <div className="section">
+          <div className="section-title">Умная оптимизация</div>
+          <button className="action-btn" onClick={optimizePlacement}>Оптимизировать размещение SKU</button>
+        </div>
 
         <ScenarioPanel current={scenario} onSelect={applyScenario} />
+        <ScenarioAnalysisPanel analysis={analysis} />
 
         {metrics && <ThroughputChart history={metrics.throughput_history} />}
 
         <EventLog events={events} />
       </aside>
 
-      <main className="viewport" ref={mountRef} />
+      <main className="viewport" ref={mountRef}>
+        {tooltip && (
+          <div className="tooltip" style={{ left: tooltip.x + 14, top: tooltip.y + 14 }}>
+            <div className="tooltip-title">{tooltip.title}</div>
+            <div className="tooltip-detail">{tooltip.details}</div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }

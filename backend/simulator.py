@@ -4,8 +4,56 @@
 """
 import random, math
 from datetime import datetime
-from collections import deque
+from collections import Counter, deque
 
+
+class WMSClient:
+    def __init__(self, simulator):
+        self.simulator = simulator
+        self.orders = deque(maxlen=100)
+        self.last_sync = datetime.now()
+        self.next_order_id = 2001
+        self.inventory = {}
+
+    def generate_orders(self):
+        rate = SCENARIO_PARAMS[self.simulator.scenario]["order_rate"]
+        if random.random() < min(0.7, rate / 120):
+            sku = random.choice([c.sku for c in self.simulator.cells if c.fill and c.sku] + [f"SKU-{random.randint(1000,9999)}"])
+            order = {
+                "id": f"O-{self.next_order_id}",
+                "sku": sku,
+                "qty": random.randint(1, 8),
+                "status": "pending",
+                "created": datetime.now().isoformat(),
+            }
+            self.orders.appendleft(order)
+            self.next_order_id += 1
+
+    def update_order_statuses(self):
+        for order in list(self.orders):
+            if order["status"] == "pending" and random.random() < 0.18:
+                order["status"] = "picking"
+            elif order["status"] == "picking" and random.random() < 0.14:
+                order["status"] = "shipped"
+
+    def sync(self):
+        self.last_sync = datetime.now()
+        inventory = Counter()
+        for cell in self.simulator.cells:
+            if cell.fill and cell.sku:
+                inventory[cell.sku] += cell.qty
+        self.inventory = dict(inventory)
+
+    def to_dict(self):
+        top_skus = sorted(self.inventory.items(), key=lambda item: -item[1])[:5]
+        return {
+            "last_sync": self.last_sync.isoformat(),
+            "unique_skus": len(self.inventory),
+            "inventory_total": sum(self.inventory.values()),
+            "pending_orders": sum(1 for order in self.orders if order["status"] != "shipped"),
+            "orders": list(self.orders)[:10],
+            "top_skus": [{"sku": sku, "qty": qty} for sku, qty in top_skus],
+        }
 
 SCENARIO_PARAMS = {
     "normal":   {"fill_target": 0.68, "agv_count": 4, "order_rate": 60,  "hot_chance": 0.05},
@@ -44,16 +92,31 @@ class AGV:
         self.battery = random.randint(40, 100)
         self.cols, self.rows = cols, rows
 
+    def _choose_new_target(self):
+        # Цель по всей территории склада, мин расстояние 2.0
+        for _ in range(30):
+            tx = random.uniform(0.0, self.cols - 1.0)
+            tz = random.uniform(0.0, self.rows - 1.0)
+            if math.hypot(tx - self.x, tz - self.z) > 2.0:
+                return tx, tz
+        # fallback — противоположный угол
+        return (self.cols - 1.0 - self.x), (self.rows - 1.0 - self.z)
+
     def tick(self):
         dx, dz = self.tx - self.x, self.tz - self.z
         dist = math.hypot(dx, dz)
-        if dist < 0.2:
-            self.tx = random.uniform(0.5, self.cols - 1.5)
-            self.tz = random.uniform(0.5, self.rows - 1.5)
-        else:
-            speed = 0.15
+
+        # Меняем цель только когда добрались — убран random.random() < 0.3
+        if dist < 0.3:
+            self.tx, self.tz = self._choose_new_target()
+            dx, dz = self.tx - self.x, self.tz - self.z
+            dist = math.hypot(dx, dz)
+
+        if dist > 0:
+            speed = 0.25
             self.x += dx / dist * speed
             self.z += dz / dist * speed
+
         self.battery = max(10, self.battery - 0.02)
 
     def to_dict(self):
@@ -83,6 +146,8 @@ class WarehouseSimulator:
             for s in range(shelves)
         ]
         self._rebuild_agvs()
+        self.wms = WMSClient(self)
+        self.wms.sync()
 
     def _rebuild_agvs(self):
         count = SCENARIO_PARAMS[self.scenario]["agv_count"]
@@ -140,6 +205,13 @@ class WarehouseSimulator:
             rate = params["order_rate"] + random.randint(-5, 5)
             self.throughput_history.append(rate)
 
+        self.wms.generate_orders()
+        if self.tick_count % 5 == 0:
+            self.wms.update_order_statuses()
+
+        if self.tick_count % 3 == 0:
+            self.wms.sync()
+
         if self.tick_count % 30 == 0:
             msgs = {
                 "normal": ["Заказ выполнен", "AGV вернулся на зарядку", "Пополнение зоны C"],
@@ -148,6 +220,11 @@ class WarehouseSimulator:
                 "low_staff": ["⚠ Явка 55%", "Скорость снижена", "Приоритет срочным"],
             }
             self._log_event(random.choice(msgs[self.scenario]))
+
+        if self.tick_count % 25 == 0:
+            low_battery = [a for a in self.agvs if a.battery < 30]
+            if low_battery:
+                self._log_event(f"Низкий заряд у {len(low_battery)} AGV", "warning")
 
     def _log_event(self, msg: str, level: str = "info"):
         self.events.appendleft({
@@ -167,12 +244,108 @@ class WarehouseSimulator:
             "total": total,
             "hot_zones": hot,
             "agv_active": len(self.agvs),
-            "agv_total": 6,
+            "agv_total": len(self.agvs),
             "orders_total": self.orders_total,
             "orders_done": self.orders_done,
+            "pending_orders": max(self.orders_total - self.orders_done, 0),
             "throughput": self.throughput_history[-1] if self.throughput_history else 0,
             "throughput_history": list(self.throughput_history[-20:]),
             "scenario": self.scenario,
+        }
+
+    def optimize_placement(self):
+        shipping = (0, 0)
+        def dist(cell):
+            return math.hypot(cell.col - shipping[0], cell.row - shipping[1])
+
+        filled_cells = [c for c in self.cells if c.fill]
+        if not filled_cells:
+            return
+
+        priority_cells = sorted(
+            filled_cells,
+            key=lambda c: ((200 if c.hot else 0) + c.qty - dist(c) * 6),
+            reverse=True,
+        )[:8]
+
+        targets = sorted(self.cells, key=lambda c: dist(c))
+        moved = 0
+
+        for cell in priority_cells:
+            if dist(cell) <= 3:
+                continue
+            for target in targets:
+                if target is cell or dist(target) >= dist(cell):
+                    continue
+                if target.fill and target.hot and not cell.hot:
+                    continue
+                cell.sku, target.sku = target.sku, cell.sku
+                cell.qty, target.qty = target.qty, cell.qty
+                cell.hot, target.hot = target.hot, cell.hot
+                cell.fill, target.fill = target.fill, cell.fill
+                moved += 1
+                break
+
+        self.wms.sync()
+        self._log_event(f"Оптимизация размещения SKU выполнена ({moved} перемещений)", "info")
+
+    def get_insights(self):
+        pending = max(self.orders_total - self.orders_done, 0)
+        trend = 0
+        if len(self.throughput_history) > 1:
+            trend = self.throughput_history[-1] - self.throughput_history[-2]
+
+        low_battery = [a.to_dict() for a in self.agvs if a.battery < 30]
+        hot_cells = [c.to_dict() for c in self.cells if c.hot][:5]
+
+        recommendations = []
+        if self.get_metrics()["fill_pct"] >= 88:
+            recommendations.append("Перераспределить размещение SKU, чтобы снизить густоту зоны хранения.")
+        if pending >= 18:
+            recommendations.append("Увеличьте пропускную способность для ускорения обработки заказов.")
+        if low_battery:
+            recommendations.append(f"Зарядите {len(low_battery)} AGV, чтобы избежать простоев.")
+        if self.scenario == "agv_fail":
+            recommendations.append("Резервное планирование для ручной обработки при отказе AGV.")
+        if not recommendations:
+            recommendations.append("Система работает стабильно, продолжайте мониторинг.")
+
+        return {
+            "pending_orders": pending,
+            "throughput_trend": trend,
+            "low_battery": low_battery,
+            "hot_cells": hot_cells,
+            "recommendations": recommendations,
+        }
+
+    def get_scenario_analysis(self):
+        base_metrics = self.get_metrics()
+        analysis = []
+        for name, params in SCENARIO_PARAMS.items():
+            projected_throughput = int(params["order_rate"] * 0.88)
+            projected_fill = int(params["fill_target"] * 100)
+            analysis.append({
+                "scenario": name,
+                "projected_throughput": projected_throughput,
+                "projected_fill_pct": projected_fill,
+                "key_message": (
+                    "Высокая нагрузка" if name == "surge" else
+                    "Риск простоя" if name == "agv_fail" else
+                    "Нехватка персонала" if name == "low_staff" else
+                    "Штатный режим"
+                ),
+            })
+        return analysis
+
+    def get_report(self):
+        metrics = self.get_metrics()
+        return {
+            "generated_at": datetime.now().isoformat(),
+            "orders_processed": self.orders_done,
+            "pending_orders": metrics["pending_orders"],
+            "avg_throughput": int(sum(self.throughput_history) / len(self.throughput_history)),
+            "hot_zone_count": metrics["hot_zones"],
+            "agv_count": metrics["agv_total"],
         }
 
     def get_state(self):
@@ -180,6 +353,10 @@ class WarehouseSimulator:
             "tick": self.tick_count,
             "scenario": self.scenario,
             "metrics": self.get_metrics(),
+            "insights": self.get_insights(),
+            "analysis": self.get_scenario_analysis(),
+            "report": self.get_report(),
+            "wms": self.wms.to_dict(),
             "cells": [c.to_dict() for c in self.cells],
             "agvs": [a.to_dict() for a in self.agvs],
         }
