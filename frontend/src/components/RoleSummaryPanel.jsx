@@ -1,7 +1,8 @@
 const ROLE_LABELS = {
   manager: "Менеджер склада",
-  operator: "Оператор AGV",
+  operator: "Оператор Погрузчика",
   logistics: "Логист",
+  viewer: "Наблюдатель",
 };
 
 export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
@@ -20,10 +21,10 @@ export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
     operator: {
       title: "Операционная готовность",
       detail: insights.low_battery.length > 0
-        ? `Низкий заряд у ${insights.low_battery.length} AGV, план зарядки.`
-        : "AGV готовы к работе, никаких аварий не обнаружено.",
+        ? `Низкий заряд у ${insights.low_battery.length} Погрузчика, план зарядки.`
+        : "Погрузчики готовы к работе, никаких аварий не обнаружено.",
       cards: [
-        { label: "AGV активных", value: `${metrics.agv_active}/${metrics.agv_total}` },
+        { label: "Погрузчиков активных", value: `${metrics.agv_active}/${metrics.agv_total}` },
         { label: "Горячих зон", value: `${metrics.hot_zones}` },
         { label: "Заказы в работе", value: `${wms.pending_orders}` },
       ],
@@ -35,6 +36,15 @@ export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
         { label: "Уникальных SKU", value: `${wms.unique_skus}` },
         { label: "Средняя пропускная", value: `${Math.round((metrics.throughput_history || [0]).reduce((a,b)=>a+b,0) / (metrics.throughput_history?.length||1))} ед/ч` },
         { label: "Запасов на складе", value: `${wms.inventory_total}` },
+      ],
+    },
+    viewer: {
+      title: "Обзор без управления",
+      detail: "Доступен мониторинг склада без операторских команд и изменения сценариев.",
+      cards: [
+        { label: "Заполняемость", value: `${metrics.fill_pct}%` },
+        { label: "Погрузчик онлайн", value: `${metrics.agv_active}/${metrics.agv_total}` },
+        { label: "Сценарий", value: metrics.scenario },
       ],
     },
   }[role] || {

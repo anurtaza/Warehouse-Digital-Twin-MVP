@@ -10,7 +10,7 @@ export default function MetricsBar({ metrics }) {
           <div className="metric-sub">{metrics.filled} / {metrics.total} ячеек</div>
         </div>
         <div className="metric">
-          <div className="metric-label">AGV активно</div>
+          <div className="metric-label">Погрузчиков активно</div>
           <div className="metric-val">{metrics.agv_active}/{metrics.agv_total}</div>
           <div className="metric-sub">{metrics.agv_total - metrics.agv_active} на зарядке</div>
         </div>

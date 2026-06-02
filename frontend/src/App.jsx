@@ -14,7 +14,9 @@ import ScenarioAnalysisPanel from "./components/ScenarioAnalysisPanel";
 import ReportPanel from "./components/ReportPanel";
 import "./App.css";
 
-const API = import.meta.env.VITE_API_URL || "/api";
+const API_ORIGIN = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const API = API_ORIGIN ? `${API_ORIGIN}/api` : "/api";
+const SOCKET_URL = API_ORIGIN || undefined;
 
 export default function App() {
   const mountRef = useRef(null);
@@ -24,18 +26,79 @@ export default function App() {
   const [analysis, setAnalysis] = useState([]);
   const [report, setReport] = useState(null);
   const [wms, setWms] = useState(null);
+  const [fifo, setFifo] = useState(null);
   const [events, setEvents] = useState([]);
+  const [agvsList, setAgvsList] = useState([]);
+  const [plannerStatus, setPlannerStatus] = useState(null);
   const [scenario, setScenarioState] = useState("normal");
   const [role, setRole] = useState("manager");
   const [connected, setConnected] = useState(false);
   const [tooltip, setTooltip] = useState(null);
+  const [selectedAgv, setSelectedAgv] = useState(0);
+  const [routeTarget, setRouteTarget] = useState({ col: 0, row: 0 });
+  const [workerRoute, setWorkerRoute] = useState(null);
+  const [workerRouteForm, setWorkerRouteForm] = useState({
+    startCol: 0,
+    startRow: 0,
+    goalCol: 5,
+    goalRow: 3,
+  });
+  const [routeEditMode, setRouteEditMode] = useState(false);
+  const [operatorMessage, setOperatorMessage] = useState("");
+  const [sidebarWidth, setSidebarWidth] = useState(360);
   const socketRef = useRef(null);
   const raycasterRef = useRef(new THREE.Raycaster());
   const pointerRef = useRef(new THREE.Vector2());
+  const selectedAgvRef = useRef(0);
+  const routeEditModeRef = useRef(false);
+  const assignRouteRef = useRef(null);
+
+  // Auth
+  const [token, setToken] = useState(null);
+  const tokenRef = useRef(null);
+  const [userRole, setUserRole] = useState(null);
+  const userRoleRef = useRef(null);
+  const [loginUser, setLoginUser] = useState("manager");
+  const [loginPass, setLoginPass] = useState("managerpass");
+
+  const activeRole = userRole || "viewer";
+  const canOperate = activeRole === "operator" || activeRole === "manager";
+  const canManage = activeRole === "manager";
+  const isLogistics = activeRole === "logistics";
+  const canViewOperations = canOperate || canManage;
+  const canViewPlanning = canManage || isLogistics;
+  const canViewWms = canManage || isLogistics;
+  const canViewInsights = canManage || activeRole === "operator";
+  const canPlanWorkerRoute = activeRole === "operator" || activeRole === "manager" || activeRole === "logistics";
+
+  const authHeaders = (extra = {}) => {
+    const headers = { ...extra };
+    if (tokenRef.current) headers.Authorization = `Bearer ${tokenRef.current}`;
+    return headers;
+  };
+
+  const refreshState = useCallback(() => {
+    return fetch(`${API}/state`)
+      .then((res) => res.json())
+      .then((data) => {
+        setMetrics(data.metrics);
+        setInsights(data.insights);
+        setAnalysis(data.analysis);
+        setReport(data.report);
+        setWms(data.wms);
+        setFifo(data.fifo || null);
+        setPlannerStatus(data.planner);
+        setScenarioState(data.scenario);
+        updateScene(data);
+        setAgvsList(data.agvs || []);
+        return data;
+      })
+      .catch(() => null);
+  }, []);
 
   // ── WebSocket connection ──────────────────────────────────────
   useEffect(() => {
-    const socket = io({ transports: ["websocket"], path: "/socket.io" });
+    const socket = io(SOCKET_URL, { transports: ["websocket"], path: "/socket.io" });
     socketRef.current = socket;
 
     socket.on("connect", () => setConnected(true));
@@ -47,8 +110,11 @@ export default function App() {
       setAnalysis(data.analysis);
       setReport(data.report);
       setWms(data.wms);
+        setFifo(data.fifo || null);
+      setPlannerStatus(data.planner);
       setScenarioState(data.scenario);
       updateScene(data);
+      setAgvsList(data.agvs || []);
     });
 
     socket.on("event", (ev) => {
@@ -63,8 +129,11 @@ export default function App() {
         setAnalysis(data.analysis);
         setReport(data.report);
         setWms(data.wms);
+        setFifo(data.fifo || null);
+        setPlannerStatus(data.planner);
         setScenarioState(data.scenario);
         updateScene(data);
+        setAgvsList(data.agvs || []);
       })
       .catch(() => {});
 
@@ -74,6 +143,30 @@ export default function App() {
       .catch(() => {});
 
     return () => socket.disconnect();
+  }, []);
+
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+  useEffect(() => {
+    userRoleRef.current = userRole;
+  }, [userRole]);
+  useEffect(() => {
+    selectedAgvRef.current = selectedAgv;
+  }, [selectedAgv]);
+  useEffect(() => {
+    routeEditModeRef.current = routeEditMode;
+  }, [routeEditMode]);
+  useEffect(() => {
+    const savedToken = localStorage.getItem("warehouse_token");
+    const savedRole = localStorage.getItem("warehouse_role");
+    const savedUser = localStorage.getItem("warehouse_user");
+    if (savedToken && savedRole) {
+      setToken(savedToken);
+      setUserRole(savedRole);
+      setRole(savedRole);
+      setLoginUser(savedUser || savedRole);
+    }
   }, []);
 
   // ── Three.js setup ────────────────────────────────────────────
@@ -157,6 +250,8 @@ export default function App() {
       palletMeshes: {},
       agvMeshes: {},
       routeLines: {},
+      workerRouteLine: null,
+      workerRouteMarkers: [],
     };
 
     const onPointerMove = (event) => {
@@ -181,7 +276,7 @@ export default function App() {
           });
           return;
         }
-        if (target?.type === "agv") {
+        if (target?.type === "Погрузчик") {
           const agv = target.data;
           setTooltip({
             title: agv.id,
@@ -195,7 +290,28 @@ export default function App() {
       setTooltip(null);
     };
 
+    const onCanvasClick = (event) => {
+      if (!routeEditModeRef.current) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycasterRef.current.setFromCamera(pointerRef.current, camera);
+
+      const cellObjects = Object.values(sceneRef.current.cellMeshes);
+      const intersects = raycasterRef.current.intersectObjects(cellObjects, true);
+      if (!intersects.length) return;
+
+      const target = intersects[0].object.userData || intersects[0].object.parent?.userData;
+      if (target?.type !== "cell") return;
+
+      const cell = target.data;
+      setOperatorMessage(`Планирование маршрута AGV-${selectedAgvRef.current} → ${cell.id}...`);
+      setRouteTarget({ col: cell.col, row: cell.row });
+      assignRouteRef.current?.(selectedAgvRef.current, cell.col, cell.row, cell.id);
+    };
+
     renderer.domElement.addEventListener("pointermove", onPointerMove);
+    renderer.domElement.addEventListener("click", onCanvasClick);
 
     // Resize
     const onResize = () => {
@@ -212,21 +328,31 @@ export default function App() {
       raf = requestAnimationFrame(animate);
       controls.update();
       const { agvMeshes } = sceneRef.current;
-      Object.values(agvMeshes).forEach((entry) => {
-        const { group, path } = entry;
-        if (!path || path.length < 2) return;
+      Object.values(agvMeshes || {}).forEach((entry) => {
+        if (!entry.backendPosition) return;
 
-        const targetPoint = path[entry.pathIndex || 1];
-        const dx = targetPoint.x - group.position.x;
-        const dz = targetPoint.z - group.position.z;
-        const dist = Math.hypot(dx, dz);
-        const speed = 0.14;
-        if (dist < 0.08) {
-          entry.pathIndex = Math.min((entry.pathIndex || 1) + 1, path.length - 1);
-        } else {
-          group.position.x += (dx / dist) * speed;
-          group.position.z += (dz / dist) * speed;
-          group.rotation.y = Math.atan2(dx, dz);
+        const drift = entry.group.position.distanceTo(entry.backendPosition);
+        if (drift > 4.5) {
+          entry.group.position.copy(entry.backendPosition);
+        }
+
+        const previous = entry.group.position.clone();
+        if (!entry.paused) {
+          entry.group.position.lerp(entry.backendPosition, 0.14);
+        }
+        const delta = entry.group.position.clone().sub(previous);
+        if (delta.length() > 0.002) {
+          entry.targetRotation = Math.atan2(delta.x, delta.z);
+          entry.wheels?.forEach((wheel) => {
+            wheel.rotation.x += delta.length() * 8;
+          });
+        }
+
+        if (entry.targetRotation !== undefined) {
+          const current = entry.group.rotation.y;
+          let delta = entry.targetRotation - current;
+          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+          entry.group.rotation.y = current + delta * 0.18;
         }
       });
       renderer.render(scene, camera);
@@ -236,6 +362,7 @@ export default function App() {
     return () => {
       cancelAnimationFrame(raf);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("click", onCanvasClick);
       window.removeEventListener("resize", onResize);
       renderer.dispose();
       el.removeChild(renderer.domElement);
@@ -299,73 +426,179 @@ export default function App() {
 
     const TOTAL_W = COLS * (CW + GAP_X);
     const TOTAL_D = ROWS * (CD + GAP_Z);
-    const currentIds = new Set(data.agvs.map((a) => a.id));
+    const currentIds = new Set(data.agvs.map((a) => String(a.id)));
 
     Object.keys(agvMeshes).forEach((id) => {
       if (!currentIds.has(id)) {
         scene.remove(agvMeshes[id].group);
         scene.remove(agvMeshes[id].routeLine);
+        agvMeshes[id].routeMarkers?.forEach((marker) => scene.remove(marker));
         delete agvMeshes[id];
       }
     });
 
-    const buildAisleLines = (OX, OZ, CW, CD, GAP_X, GAP_Z) => {
-      const corridorXs = [];
-      const corridorZs = [];
-      for (let i = 0; i < COLS - 1; i++) {
-        corridorXs.push(OX + (i + 0.5) * (CW + GAP_X));
+    const agvPoint = (col, row, y = 0.28) => new THREE.Vector3(
+      OX + col * (CW + GAP_X),
+      y,
+      OZ + row * (CD + GAP_Z)
+    );
+
+    const buildRightAnglePath = (start, end) => {
+      const path = [start.clone()];
+      const xFirst = Math.abs(end.x - start.x) >= Math.abs(end.z - start.z);
+      const corner = xFirst
+        ? new THREE.Vector3(end.x, start.y, start.z)
+        : new THREE.Vector3(start.x, start.y, end.z);
+
+      if (corner.distanceTo(start) > 0.05 && corner.distanceTo(end) > 0.05) {
+        path.push(corner);
       }
-      for (let i = 0; i < ROWS - 1; i++) {
-        corridorZs.push(OZ + (i + 0.5) * (CD + GAP_Z));
-      }
-      return { corridorXs, corridorZs };
+      path.push(end.clone());
+      return path;
     };
 
-    const chooseClosest = (value, list) => {
-      return list.reduce((best, current) => Math.abs(current - value) < Math.abs(best - value) ? current : best, list[0]);
-    };
-
-    const buildAislePath = (start, target) => {
-      const { corridorXs, corridorZs } = buildAisleLines(OX, OZ, CW, CD, GAP_X, GAP_Z);
-      const nearest = (value, list) => list.reduce((best, current) => Math.abs(current - value) < Math.abs(best - value) ? current : best, list[0]);
-      const startCorridorX = nearest(start.x, corridorXs);
-      const startCorridorZ = nearest(start.z, corridorZs);
-      const targetCorridorX = nearest(target.x, corridorXs);
-      const targetCorridorZ = nearest(target.z, corridorZs);
-
-      const path = [new THREE.Vector3(start.x, start.y, start.z)];
-      const addPoint = (x, y, z) => {
-        const last = path[path.length - 1];
-        if (Math.abs(last.x - x) > 0.01 || Math.abs(last.z - z) > 0.01) {
-          path.push(new THREE.Vector3(x, y, z));
+    const orthogonalizePath = (points) => {
+      const normalized = [];
+      points.forEach((point, index) => {
+        const current = point.clone();
+        if (index === 0) {
+          normalized.push(current);
+          return;
         }
+        const previous = normalized[normalized.length - 1];
+        if (previous.distanceTo(current) < 0.05) return;
+
+        const sameX = Math.abs(previous.x - current.x) < 0.05;
+        const sameZ = Math.abs(previous.z - current.z) < 0.05;
+        if (sameX || sameZ) {
+          normalized.push(current);
+          return;
+        }
+
+        const [, ...rest] = buildRightAnglePath(previous, current);
+        rest.forEach((candidate) => {
+          const last = normalized[normalized.length - 1];
+          if (last.distanceTo(candidate) > 0.05) normalized.push(candidate);
+        });
+      });
+      return normalized;
+    };
+
+    const corridorXs = Array.from({ length: COLS - 1 }, (_, index) => OX + (index + 0.5) * (CW + GAP_X));
+    const corridorZs = Array.from({ length: ROWS - 1 }, (_, index) => OZ + (index + 0.5) * (CD + GAP_Z));
+    const nearest = (value, list) => list.reduce(
+      (best, current) => Math.abs(current - value) < Math.abs(best - value) ? current : best,
+      list[0]
+    );
+
+    const buildAislePath = (start, end) => {
+      const y = start.y;
+      const startAisleX = nearest(start.x, corridorXs);
+      const startAisleZ = nearest(start.z, corridorZs);
+      const endAisleX = nearest(end.x, corridorXs);
+      const endAisleZ = nearest(end.z, corridorZs);
+      const path = [start.clone()];
+
+      const addPoint = (x, z) => {
+        const last = path[path.length - 1];
+        const point = new THREE.Vector3(x, y, z);
+        if (last.distanceTo(point) > 0.05) path.push(point);
       };
 
-      // 1) Выход на ближайший коридор
-      const dxToX = Math.abs(start.x - startCorridorX);
-      const dzToZ = Math.abs(start.z - startCorridorZ);
-      if (dxToX <= dzToZ) {
-        addPoint(startCorridorX, start.y, start.z);
+      if (Math.abs(start.x - startAisleX) <= Math.abs(start.z - startAisleZ)) {
+        addPoint(startAisleX, start.z);
+        addPoint(startAisleX, startAisleZ);
       } else {
-        addPoint(start.x, start.y, startCorridorZ);
+        addPoint(start.x, startAisleZ);
+        addPoint(startAisleX, startAisleZ);
       }
 
-      // 2) Движение по X/Z внутри склада: перейти на пересечение коридоров
-      const current = path[path.length - 1];
-      const onXcorridor = Math.abs(current.x - startCorridorX) < 0.01;
-      const onZcorridor = Math.abs(current.z - startCorridorZ) < 0.01;
+      addPoint(startAisleX, endAisleZ);
+      addPoint(endAisleX, endAisleZ);
 
-      if (onXcorridor) {
-        addPoint(current.x, start.y, targetCorridorZ);
-        addPoint(targetCorridorX, start.y, targetCorridorZ);
-      } else if (onZcorridor) {
-        addPoint(targetCorridorX, start.y, current.z);
-        addPoint(targetCorridorX, start.y, targetCorridorZ);
+      if (Math.abs(end.x - endAisleX) <= Math.abs(end.z - endAisleZ)) {
+        addPoint(endAisleX, end.z);
+      } else {
+        addPoint(end.x, endAisleZ);
       }
+      addPoint(end.x, end.z);
 
-      // 3) Вход в целевую ячейку
-      addPoint(target.x, start.y, target.z);
-      return path;
+      return orthogonalizePath(path);
+    };
+
+    const buildAisleSequencePath = (points) => {
+      if (points.length <= 1) return points.map((point) => point.clone());
+      const sequence = [];
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const segment = buildAislePath(points[index], points[index + 1]);
+        segment.forEach((point) => {
+          const last = sequence[sequence.length - 1];
+          if (!last || last.distanceTo(point) > 0.05) sequence.push(point);
+        });
+      }
+      return sequence;
+    };
+
+    const displayRoutePath = (path) => path.map((point) => new THREE.Vector3(point.x, 0.9, point.z));
+
+    const clearRouteMarkers = (entry) => {
+      entry.routeMarkers?.forEach((marker) => {
+        scene.remove(marker);
+        marker.geometry?.dispose();
+        marker.material?.dispose();
+      });
+      entry.routeMarkers = [];
+    };
+
+    const drawRouteMarkers = (entry, points, visible) => {
+      clearRouteMarkers(entry);
+      if (!visible || points.length < 2) return;
+
+      const material = new THREE.MeshStandardMaterial({
+        color: 0x7fffd4,
+        emissive: 0x2ecc71,
+        emissiveIntensity: 0.65,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+      });
+
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const start = points[index];
+        const end = points[index + 1];
+        const segment = end.clone().sub(start);
+        const length = segment.length();
+        if (length < 0.05) continue;
+
+        const tube = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.055, 0.055, length, 10),
+          material.clone()
+        );
+        tube.position.copy(start).add(end).multiplyScalar(0.5);
+        tube.quaternion.setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          segment.clone().normalize()
+        );
+        tube.renderOrder = 12;
+        scene.add(tube);
+        entry.routeMarkers.push(tube);
+      }
+    };
+
+    const chooseDriveIndex = (groupPosition, path, previousIndex = 1) => {
+      if (path.length <= 1) return 0;
+      let nearestIndex = 0;
+      let nearestDistance = Infinity;
+      path.forEach((point, index) => {
+        const distance = groupPosition.distanceTo(point);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = index;
+        }
+      });
+      const nextIndex = Math.max(1, Math.min(nearestIndex + 1, path.length - 1));
+      if (previousIndex > nextIndex && previousIndex < path.length) return previousIndex;
+      return nextIndex;
     };
 
     data.agvs.forEach((agv) => {
@@ -377,9 +610,17 @@ export default function App() {
       const batteryColor = agv.battery < 30 ? 0xc0392b : agv.battery < 60 ? 0xf39c12 : 0x27ae60;
 
       let entry = agvMeshes[key];
-      const startPos = entry ? entry.group.position.clone() : new THREE.Vector3(worldX, 0.18, worldZ);
+      const backendPos = new THREE.Vector3(worldX, 0.18, worldZ);
       const targetPos = new THREE.Vector3(targetX, 0.18, targetZ);
-      const path = buildAislePath(startPos, targetPos);
+      const displayNodes = agv.route_path?.length ? agv.route_path : agv.planned_path;
+      const hasAssignedRoute = Boolean(displayNodes?.length > 1 && (agv.planned_path?.length || agv.hold_position || agv.manual));
+      const plannedPoints = displayNodes?.length
+        ? displayNodes.map(([col, row]) => agvPoint(col, row, 0.18))
+        : [];
+      const path = hasAssignedRoute
+        ? orthogonalizePath(plannedPoints)
+        : [backendPos];
+      const routePath = displayRoutePath(path);
 
       if (!entry) {
         const body = new THREE.Mesh(
@@ -416,36 +657,57 @@ export default function App() {
 
         const group = new THREE.Group();
         group.userData = { type: "agv", data: { ...agv, worldTx: targetX, worldTz: targetZ } };
-        group.add(body, platform, cabin, light,
+        const wheels = [
           makeWheel(0.3, 0.28),
           makeWheel(-0.3, 0.28),
           makeWheel(0.3, -0.28),
           makeWheel(-0.3, -0.28)
-        );
-        group.position.copy(startPos);
+        ];
+
+        group.add(body, platform, cabin, light, ...wheels);
+        group.position.copy(backendPos);
         scene.add(group);
 
         const routeLine = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(path),
-          new THREE.LineDashedMaterial({ color: 0x57c7ff, dashSize: 0.4, gapSize: 0.2, transparent: true, opacity: 0.7 })
+          new THREE.BufferGeometry().setFromPoints(routePath),
+          new THREE.LineDashedMaterial({
+            color: 0x7fffd4,
+            dashSize: 0.55,
+            gapSize: 0.18,
+            transparent: true,
+            opacity: 0.95,
+            depthTest: false,
+          })
         );
+        routeLine.renderOrder = 10;
         routeLine.computeLineDistances();
+        routeLine.visible = hasAssignedRoute;
         scene.add(routeLine);
 
-        entry = { group, routeLine, path, pathIndex: 1 };
+        entry = {
+          group,
+          routeLine,
+          routeMarkers: [],
+          path,
+          backendPosition: backendPos.clone(),
+          targetRotation: group.rotation.y,
+          wheels,
+          paused: agv.paused,
+          routeActive: hasAssignedRoute,
+        };
+        drawRouteMarkers(entry, routePath, hasAssignedRoute);
         agvMeshes[key] = entry;
       } else {
-        const distance = entry.group.position.distanceTo(startPos);
-        if (distance > 1.5) {
-          entry.group.position.copy(startPos);
-        }
-        entry.group.rotation.y = Math.atan2(targetX - entry.group.position.x, targetZ - entry.group.position.z);
+        entry.backendPosition = backendPos.clone();
+        entry.paused = agv.paused;
+        entry.routeActive = hasAssignedRoute;
+        entry.routeLine.visible = hasAssignedRoute;
         entry.group.userData.data = { ...agv, worldTx: targetX, worldTz: targetZ };
         entry.group.children[0].material.color.setHex(batteryColor);
         entry.path = path;
-        entry.pathIndex = Math.min(entry.pathIndex || 1, entry.path.length - 1);
-        entry.routeLine.geometry.setFromPoints(path);
+        entry.routeLine.geometry.setFromPoints(routePath);
         entry.routeLine.computeLineDistances();
+        drawRouteMarkers(entry, routePath, hasAssignedRoute);
       }
     });
 
@@ -453,15 +715,256 @@ export default function App() {
     sceneRef.current.palletMeshes = palletMeshes;
     sceneRef.current.agvMeshes = agvMeshes;
     sceneRef.current.routeLines = routeLines;
+    // update agv list for control panel
+    setAgvsList(data.agvs || []);
   }, []);
+
+  const assignRoute = (agvId, col, row, label = `C${col}/R${row}`) => {
+    if (!canOperate) {
+      setOperatorMessage("Маршрут может назначать только operator или manager.");
+      return;
+    }
+
+    const nextCol = Number(col);
+    const nextRow = Number(row);
+    if (!Number.isInteger(nextCol) || !Number.isInteger(nextRow) || nextCol < 0 || nextCol > 9 || nextRow < 0 || nextRow > 5) {
+      setOperatorMessage("Укажите координаты: колонка 0..9, ряд 0..5.");
+      return;
+    }
+
+    const headers = authHeaders({ "Content-Type": "application/json" });
+    setOperatorMessage(`Планирование маршрута Погрузчика-${agvId} → ${label}...`);
+    fetch(`${API}/planner/assign`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ agv_id: agvId, col: nextCol, row: nextRow }),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setOperatorMessage(data.error === "forbidden"
+            ? "Недостаточно прав для назначения маршрута."
+            : `Маршрут не назначен: ${data.error || "ошибка"}`);
+          return;
+        }
+        const state = data.state;
+        setOperatorMessage(`Маршрут поставлен: Погрузчик-${agvId} → ${label}`);
+        if (state) {
+          setMetrics(state.metrics);
+          setInsights(state.insights);
+          setAnalysis(state.analysis);
+          setReport(state.report);
+          setWms(state.wms);
+          setPlannerStatus(state.planner);
+          updateScene(state);
+          setAgvsList(state.agvs || []);
+        }
+      })
+      .catch(() => setOperatorMessage("Не удалось назначить маршрут."));
+  };
+
+  useEffect(() => {
+    assignRouteRef.current = assignRoute;
+  }, [assignRoute]);
+
+  const gridToWorld = (col, row, y = 0.34) => {
+    const COLS = 10;
+    const ROWS = 6;
+    const CW = 2.0;
+    const CD = 1.6;
+    const GAP_X = 0.5;
+    const GAP_Z = 1.4;
+    const OX = -(COLS * (CW + GAP_X)) / 2 + CW / 2;
+    const OZ = -(ROWS * (CD + GAP_Z)) / 2 + CD / 2;
+    return new THREE.Vector3(OX + col * (CW + GAP_X), y, OZ + row * (CD + GAP_Z));
+  };
+
+  const renderWorkerRoute = (path) => {
+    const { scene } = sceneRef.current;
+    if (!scene) return;
+
+    if (sceneRef.current.workerRouteLine) {
+      scene.remove(sceneRef.current.workerRouteLine);
+      sceneRef.current.workerRouteLine.geometry.dispose();
+      sceneRef.current.workerRouteLine.material.dispose();
+      sceneRef.current.workerRouteLine = null;
+    }
+    sceneRef.current.workerRouteMarkers?.forEach((marker) => {
+      scene.remove(marker);
+      marker.traverse((child) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      });
+    });
+    sceneRef.current.workerRouteMarkers = [];
+
+    if (!path?.length) return;
+    const points = path.map(([col, row]) => gridToWorld(col, row, 5.4));
+    const routeGroup = new THREE.Group();
+    const routeMaterial = new THREE.MeshStandardMaterial({
+        color: 0x2ecc71,
+        emissive: 0x2ecc71,
+        emissiveIntensity: 0.55,
+        transparent: true,
+        opacity: 0.95,
+    });
+
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const start = points[index];
+      const end = points[index + 1];
+      const segment = end.clone().sub(start);
+      const length = segment.length();
+      if (length < 0.01) continue;
+
+      const cylinder = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.08, 0.08, length, 12),
+        routeMaterial
+      );
+      cylinder.position.copy(start).add(end).multiplyScalar(0.5);
+      cylinder.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        segment.clone().normalize()
+      );
+      routeGroup.add(cylinder);
+    }
+
+    scene.add(routeGroup);
+    sceneRef.current.workerRouteLine = routeGroup;
+
+    const makeMarker = (point, color, height) => {
+      const group = new THREE.Group();
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.05, 0.05, height, 12),
+        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.18 })
+      );
+      pole.position.set(point.x, height / 2, point.z);
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.28, 16, 12),
+        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.55 })
+      );
+      dot.position.set(point.x, height + 0.28, point.z);
+      group.add(pole, dot);
+      scene.add(group);
+      return group;
+    };
+
+    const startGround = gridToWorld(path[0][0], path[0][1], 0.1);
+    const goal = path[path.length - 1];
+    const goalGround = gridToWorld(goal[0], goal[1], 0.1);
+    const startMarker = makeMarker(startGround, 0x2ecc71, 5.2);
+    const goalMarker = makeMarker(goalGround, 0xff4f4f, 5.2);
+    const waypointMarkers = path.slice(1, -1).map(([col, row]) => {
+      const point = gridToWorld(col, row, 5.4);
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.13, 10, 8),
+        new THREE.MeshStandardMaterial({ color: 0x7fffd4, emissive: 0x2ecc71, emissiveIntensity: 0.25 })
+      );
+      marker.position.copy(point);
+      scene.add(marker);
+      return marker;
+    });
+    sceneRef.current.workerRouteMarkers = [startMarker, goalMarker, ...waypointMarkers];
+  };
+
+  const planWorkerRoute = () => {
+    if (!canPlanWorkerRoute) {
+      setOperatorMessage("Маршрут складовщика доступен для operator, logistics и manager.");
+      return;
+    }
+
+    const payload = {
+      start: {
+        col: Number(workerRouteForm.startCol),
+        row: Number(workerRouteForm.startRow),
+      },
+      goal: {
+        col: Number(workerRouteForm.goalCol),
+        row: Number(workerRouteForm.goalRow),
+      },
+    };
+
+    fetch(`${API}/worker/route`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setOperatorMessage(`Маршрут складовщика не построен: ${data.error || "ошибка"}`);
+          return;
+        }
+        setWorkerRoute(data);
+        renderWorkerRoute(data.path);
+        setOperatorMessage(`Маршрут складовщика построен на 3D: ${data.distance} шагов, ETA ${data.eta_minutes} мин`);
+      })
+      .catch(() => setOperatorMessage("Не удалось построить маршрут складовщика."));
+  };
+
+  const clearWorkerRoute = () => {
+    setWorkerRoute(null);
+    renderWorkerRoute([]);
+    setOperatorMessage("Маршрут складовщика очищен с 3D-сцены.");
+  };
+
+  const sendAgvCommand = (id, cmd, args = {}) => {
+    const headers = authHeaders({ "Content-Type": "application/json" });
+    setOperatorMessage(`Команда Погрузчик-${id}: ${cmd}`);
+    fetch(`${API}/agv/${id}/command`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ cmd, args }),
+    })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setOperatorMessage(data.error === "auth_required"
+            ? "Войдите как operator или manager."
+            : `Команда отклонена: ${data.error || "ошибка"}`);
+          return;
+        }
+        setOperatorMessage(`Команда принята: Погрузчик-${id} ${cmd}`);
+        if (data.state) {
+          setMetrics(data.state.metrics);
+          setInsights(data.state.insights);
+          setAnalysis(data.state.analysis);
+          setReport(data.state.report);
+          setWms(data.state.wms);
+          setFifo(data.state.fifo || null);
+          setPlannerStatus(data.state.planner);
+          updateScene(data.state);
+          setAgvsList(data.state.agvs || []);
+        }
+      })
+      .catch(() => setOperatorMessage("Не удалось отправить команду."));
+  };
 
   // ── Scenario control ──────────────────────────────────────────
   const applyScenario = (name) => {
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit("set_scenario", { scenario: name });
-    } else {
-      fetch(`${API}/scenario/${name}`, { method: "POST" });
-    }
+    fetch(`${API}/scenario/${name}`, {
+      method: "POST",
+      headers: authHeaders(),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setOperatorMessage("Сценарий может менять только manager.");
+          return;
+        }
+        if (data.state) {
+          setMetrics(data.state.metrics);
+          setInsights(data.state.insights);
+          setAnalysis(data.state.analysis);
+          setReport(data.state.report);
+          setWms(data.state.wms);
+          setFifo(data.state.fifo || null);
+          setPlannerStatus(data.state.planner);
+          setScenarioState(data.state.scenario);
+          updateScene(data.state);
+          setAgvsList(data.state.agvs || []);
+        }
+      })
+      .catch(() => setOperatorMessage("Не удалось переключить сценарий."));
   };
   const exportReport = () => {
     const payload = report && metrics ? {
@@ -480,26 +983,88 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
   const optimizePlacement = () => {
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit("optimize", {});
-      return;
-    }
-    fetch(`${API}/optimize`, { method: "POST" })
-      .then((res) => res.json())
-      .then((data) => {
+    fetch(`${API}/optimize`, {
+      method: "POST",
+      headers: authHeaders(),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setOperatorMessage("Оптимизацию может запускать только manager.");
+          return;
+        }
         if (data.state) {
           setMetrics(data.state.metrics);
           setInsights(data.state.insights);
+          setAnalysis(data.state.analysis);
+          setReport(data.state.report);
           setWms(data.state.wms);
+          setFifo(data.state.fifo || null);
+          setPlannerStatus(data.state.planner);
           updateScene(data.state);
+          setAgvsList(data.state.agvs || []);
         }
       })
-      .catch(() => {});
+      .catch(() => setOperatorMessage("Не удалось запустить оптимизацию."));
+  };
+
+  const login = () => {
+    fetch(`${API}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: loginUser, password: loginPass }),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setOperatorMessage("Неверный логин или пароль.");
+          return;
+        }
+        setToken(data.token);
+        setUserRole(data.role);
+        setRole(data.role);
+        localStorage.setItem("warehouse_token", data.token);
+        localStorage.setItem("warehouse_role", data.role);
+        localStorage.setItem("warehouse_user", data.username);
+        setOperatorMessage(`Вход выполнен: ${data.username} (${data.role})`);
+      })
+      .catch(() => setOperatorMessage("Не удалось войти."));
+  };
+
+  const logout = () => {
+    setToken(null);
+    setUserRole(null);
+    localStorage.removeItem("warehouse_token");
+    localStorage.removeItem("warehouse_role");
+    localStorage.removeItem("warehouse_user");
+    setOperatorMessage("Сессия завершена.");
+  };
+
+  const beginSidebarResize = (event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const onMove = (moveEvent) => {
+      const nextWidth = Math.max(300, Math.min(520, startWidth + moveEvent.clientX - startX));
+      setSidebarWidth(nextWidth);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   return (
-    <div className="layout">
+    <div className="layout" style={{ gridTemplateColumns: `${sidebarWidth}px 1fr` }}>
       <aside className="sidebar">
+        <button
+          className="sidebar-resizer"
+          type="button"
+          aria-label="Изменить ширину панели"
+          onPointerDown={beginSidebarResize}
+        />
         <div className="logo">
           <span className="logo-icon">🏭</span>
           <div>
@@ -511,24 +1076,276 @@ export default function App() {
           </span>
         </div>
 
-        {metrics && <MetricsBar metrics={metrics} />}
-        <RolePanel role={role} onSelect={setRole} />
-        <RoleSummaryPanel role={role} metrics={metrics} insights={insights} wms={wms} />
-        {report && <ReportPanel report={report} onExport={exportReport} />}
-        {insights && <InsightsPanel insights={insights} />}
-        {wms && <WmsPanel wms={wms} />}
+        <div className="section auth-panel">
+          <div className="section-title">Доступ оператора</div>
+          {userRole ? (
+            <div className="auth-session">
+              <div>
+                <div className="auth-user">{loginUser || "user"}</div>
+                <div className="auth-role">{userRole}</div>
+              </div>
+              <button className="action-btn secondary" onClick={logout}>Выйти</button>
+            </div>
+          ) : (
+            <div className="login-grid">
+              <select value={loginUser} onChange={(e) => {
+                const value = e.target.value;
+                setLoginUser(value);
+                setLoginPass(`${value}pass`);
+              }}>
+                <option value="manager">manager</option>
+                <option value="operator">operator</option>
+                <option value="logistics">logistics</option>
+                <option value="viewer">viewer</option>
+              </select>
+              <input value={loginPass} onChange={(e) => setLoginPass(e.target.value)} type="password" />
+              <button className="action-btn" onClick={login}>Войти</button>
+            </div>
+          )}
+        </div>
 
+        {metrics && <MetricsBar metrics={metrics} />}
+        <RolePanel role={activeRole} />
+        <RoleSummaryPanel role={activeRole} metrics={metrics} insights={insights} wms={wms} />
+
+        {canPlanWorkerRoute && (
+        <div className="section worker-route-panel">
+          <div className="section-title">Маршрут складовщика</div>
+          <div className="worker-route-hint">
+            Введите старт и цель, затем маршрут появится зелёной линией на 3D-сцене. Точки маршрута останутся ниже.
+          </div>
+          <div className="worker-route-grid">
+            <label>
+              Старт C
+              <input
+                type="number"
+                min="0"
+                max="9"
+                value={workerRouteForm.startCol}
+                onChange={(e) => setWorkerRouteForm((value) => ({ ...value, startCol: e.target.value }))}
+              />
+            </label>
+            <label>
+              Старт R
+              <input
+                type="number"
+                min="0"
+                max="5"
+                value={workerRouteForm.startRow}
+                onChange={(e) => setWorkerRouteForm((value) => ({ ...value, startRow: e.target.value }))}
+              />
+            </label>
+            <label>
+              Цель C
+              <input
+                type="number"
+                min="0"
+                max="9"
+                value={workerRouteForm.goalCol}
+                onChange={(e) => setWorkerRouteForm((value) => ({ ...value, goalCol: e.target.value }))}
+              />
+            </label>
+            <label>
+              Цель R
+              <input
+                type="number"
+                min="0"
+                max="5"
+                value={workerRouteForm.goalRow}
+                onChange={(e) => setWorkerRouteForm((value) => ({ ...value, goalRow: e.target.value }))}
+              />
+            </label>
+          </div>
+          <div className="worker-route-actions">
+            <button className="action-btn compact" onClick={planWorkerRoute}>Построить на 3D</button>
+            <button className="action-btn secondary compact" onClick={clearWorkerRoute}>Очистить</button>
+          </div>
+          {workerRoute && (
+            <div className="worker-route-result">
+              <div className="worker-route-summary">
+                3D-маршрут построен · {workerRoute.distance} шагов · ETA {workerRoute.eta_minutes} мин
+              </div>
+              <div className="worker-route-endpoints">
+                Старт: C{workerRoute.path[0][0]}/R{workerRoute.path[0][1]} · Цель: C{workerRoute.path.at(-1)[0]}/R{workerRoute.path.at(-1)[1]}
+              </div>
+              <div className="worker-route-steps">
+                {workerRoute.path.map(([col, row], index) => (
+                  <span key={`${col}-${row}-${index}`}>C{col}/R{row}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        )}
+
+        {canViewOperations && (
+        <div className="section agv-control">
+          <div className="section-title">Loader Control Center</div>
+          {operatorMessage && <div className="operator-message">{operatorMessage}</div>}
+          {plannerStatus && (
+            <div className="planner-strip">
+              <span>Reserved cells: {plannerStatus.reserved_vertices}</span>
+              <span>Agents: {plannerStatus.agents}</span>
+            </div>
+          )}
+          <div className="route-editor-head">
+            <div>
+              <div className="route-title">Построение маршрута</div>
+              <div className="route-sub">Выберите Погрузчика, затем кликните по ячейке или задайте координаты</div>
+            </div>
+            <button
+              className={`toggle-btn ${routeEditMode ? "active" : ""}`}
+              disabled={!canOperate}
+              onClick={() => setRouteEditMode((value) => !value)}
+            >
+              {routeEditMode ? "Editing" : "Route"}
+            </button>
+          </div>
+          <div className="route-manual">
+            <label>
+              Колонка
+              <input
+                type="number"
+                min="0"
+                max="9"
+                value={routeTarget.col}
+                disabled={!canOperate}
+                onChange={(e) => setRouteTarget((value) => ({ ...value, col: e.target.value }))}
+              />
+            </label>
+            <label>
+              Ряд
+              <input
+                type="number"
+                min="0"
+                max="5"
+                value={routeTarget.row}
+                disabled={!canOperate}
+                onChange={(e) => setRouteTarget((value) => ({ ...value, row: e.target.value }))}
+              />
+            </label>
+            <button
+              className="action-btn compact"
+              disabled={!canOperate}
+              onClick={() => assignRoute(selectedAgv, routeTarget.col, routeTarget.row)}
+            >
+              Поставить
+            </button>
+          </div>
+          {agvsList && agvsList.length === 0 && <div style={{opacity:0.7}}>No Loaders</div>}
+          {agvsList && agvsList.map((a) => (
+            <div
+              key={a.id}
+              className={`agv-card ${selectedAgv === a.id ? "selected" : ""}`}
+              onClick={() => setSelectedAgv(a.id)}
+            >
+              <div className="agv-card-head">
+                <strong>Погрузчик-{a.id}</strong>
+                <span className={`agv-status ${a.paused ? "paused" : a.manual ? "manual" : ""}`}>{a.status}</span>
+              </div>
+              <div className="agv-detail">
+                Battery {a.battery}% · Target {a.tx}, {a.tz}
+                {a.planned_path?.length ? ` · Route ${a.planned_path.length} nodes` : ""}
+              </div>
+              <div className="agv-actions">
+                <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "pause"); }}>Pause</button>
+                <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "resume"); }}>Resume</button>
+                <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "charge"); }}>Charge</button>
+                <button className="icon-btn danger" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "cancel"); }}>Убрать</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        )}
+
+        {canManage && (
         <div className="section">
           <div className="section-title">Умная оптимизация</div>
           <button className="action-btn" onClick={optimizePlacement}>Оптимизировать размещение SKU</button>
         </div>
+        )}
 
-        <ScenarioPanel current={scenario} onSelect={applyScenario} />
-        <ScenarioAnalysisPanel analysis={analysis} />
+        {canManage && <ScenarioPanel current={scenario} onSelect={applyScenario} />}
+        {canViewPlanning && <ScenarioAnalysisPanel analysis={analysis} />}
 
         {metrics && <ThroughputChart history={metrics.throughput_history} />}
+        {canViewPlanning && report && <ReportPanel report={report} onExport={exportReport} />}
+        {canViewInsights && insights && <InsightsPanel insights={insights} />}
+        {canViewWms && wms && <WmsPanel wms={wms} />}
 
-        <EventLog events={events} />
+        {/* ── FIFO панель ─────────────────────────────────────── */}
+        {(canViewOperations || canViewWms) && fifo && (
+          <div className="section" style={{padding: "12px 14px"}}>
+            <div className="section-title">FIFO — очередь задач</div>
+
+            {/* Статистика */}
+            <div style={{display:"flex", gap:8, marginBottom:10}}>
+              {[
+                {val: fifo.queue_length,      lbl: "в очереди"},
+                {val: fifo.total_dispatched,  lbl: "выдано задач"},
+                {val: fifo.fifo_shipped,      lbl: "отгружено"},
+              ].map(({val, lbl}) => (
+                <div key={lbl} style={{flex:1, background:"rgba(255,255,255,0.05)", borderRadius:6, padding:"6px 8px", textAlign:"center"}}>
+                  <div style={{fontSize:18, fontWeight:600, color:"#7fffd4", lineHeight:1}}>{val}</div>
+                  <div style={{fontSize:10, opacity:0.55, marginTop:3}}>{lbl}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Очередь задач AGV */}
+            {fifo.task_queue && fifo.task_queue.length > 0 ? (
+              <div style={{display:"flex", flexDirection:"column", gap:4, marginBottom:10}}>
+                {fifo.task_queue.map((task) => (
+                  <div key={task.seq} style={{display:"flex", alignItems:"center", gap:6, background:"rgba(127,255,212,0.07)", borderRadius:5, padding:"4px 8px", fontSize:12}}>
+                    <span style={{color:"#7fffd4", fontWeight:600, minWidth:22}}>#{task.queue_pos}</span>
+                    <span style={{color:"#a0c4ff", minWidth:52}}>AGV-{task.agv_id}</span>
+                    <span style={{flex:1, opacity:0.8}}>→ C{task.col} / R{task.row}</span>
+                    {task.order_id && <span style={{opacity:0.45, fontSize:11}}>{task.order_id}</span>}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{fontSize:12, opacity:0.45, marginBottom:10, fontStyle:"italic"}}>
+                Очередь пуста — задачи выдаются сразу
+              </div>
+            )}
+
+            {/* Заказы WMS в FIFO-порядке */}
+            {wms && wms.orders && wms.orders.length > 0 && (
+              <>
+                <div style={{fontSize:11, opacity:0.5, marginBottom:5, textTransform:"uppercase", letterSpacing:"0.04em"}}>
+                  Заказы — порядок обработки
+                </div>
+                <div style={{display:"flex", flexDirection:"column", gap:3}}>
+                  {wms.orders.slice(0, 7).map((order, i) => {
+                    const statusColors = {pending:"#f39c12", picking:"#3498db", shipped:"#27ae60"};
+                    const statusLabels = {pending:"ожидает", picking:"пикинг", shipped:"отгружен"};
+                    return (
+                      <div key={order.id} style={{
+                        display:"flex", alignItems:"center", gap:6,
+                        padding:"3px 8px", borderRadius:5, fontSize:11,
+                        background: i === 0 ? "rgba(243,156,18,0.12)" : "rgba(255,255,255,0.03)",
+                        borderLeft: i === 0 ? "2px solid #f39c12" : "2px solid transparent",
+                      }}>
+                        <span style={{opacity:0.4, minWidth:14}}>{i+1}</span>
+                        <span style={{color:"#a0c4ff", minWidth:54}}>{order.id}</span>
+                        <span style={{flex:1, opacity:0.65, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{order.sku}</span>
+                        <span style={{color: statusColors[order.status] || "#aaa", fontWeight:500}}>
+                          {statusLabels[order.status] || order.status}
+                        </span>
+                        {order.cell_id && (
+                          <span style={{opacity:0.4, fontSize:10}}>→ {order.cell_id}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {(canOperate || canManage) && <EventLog events={events} />}
       </aside>
 
       <main className="viewport" ref={mountRef}>

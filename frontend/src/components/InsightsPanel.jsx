@@ -16,7 +16,7 @@ export default function InsightsPanel({ insights }) {
           <div className="metric-sub">Последнее обновление</div>
         </div>
         <div className="metric">
-          <div className="metric-label">AGV с низким зарядом</div>
+          <div className="metric-label">Погрузчик с низким зарядом</div>
           <div className="metric-val">{insights.low_battery.length}</div>
           <div className="metric-sub">менее 30%</div>
         </div>
