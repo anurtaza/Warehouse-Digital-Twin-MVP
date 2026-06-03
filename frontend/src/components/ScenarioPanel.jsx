@@ -1,6 +1,6 @@
 const SCENARIOS = [
   { id: "normal",   icon: "⚙️", name: "Обычный",  desc: "Штатный режим" },
-  { id: "surge",    icon: "📈", name: "Пиковый",   desc: "+100% заказов" },
+  { id: "surge",    icon: "📈", name: "Летний сезон",   desc: "+400% заказов" },
   { id: "agv_fail", icon: "🤖", name: "Отказ Погрузчиков", desc: "2 из 6 работают" },
   { id: "low_staff",icon: "👤", name: "Нехватка",  desc: "55% персонала" },
 ];

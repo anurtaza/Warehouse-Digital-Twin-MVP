@@ -26,7 +26,6 @@ export default function App() {
   const [analysis, setAnalysis] = useState([]);
   const [report, setReport] = useState(null);
   const [wms, setWms] = useState(null);
-  const [fifo, setFifo] = useState(null);
   const [events, setEvents] = useState([]);
   const [agvsList, setAgvsList] = useState([]);
   const [plannerStatus, setPlannerStatus] = useState(null);
@@ -86,7 +85,6 @@ export default function App() {
         setAnalysis(data.analysis);
         setReport(data.report);
         setWms(data.wms);
-        setFifo(data.fifo || null);
         setPlannerStatus(data.planner);
         setScenarioState(data.scenario);
         updateScene(data);
@@ -110,7 +108,6 @@ export default function App() {
       setAnalysis(data.analysis);
       setReport(data.report);
       setWms(data.wms);
-        setFifo(data.fifo || null);
       setPlannerStatus(data.planner);
       setScenarioState(data.scenario);
       updateScene(data);
@@ -129,7 +126,6 @@ export default function App() {
         setAnalysis(data.analysis);
         setReport(data.report);
         setWms(data.wms);
-        setFifo(data.fifo || null);
         setPlannerStatus(data.planner);
         setScenarioState(data.scenario);
         updateScene(data);
@@ -222,6 +218,41 @@ export default function App() {
     scene.add(floor);
     scene.add(new THREE.GridHelper(60, 30, 0x243040, 0x243040));
 
+    // ── Зарядная станция (за пределами склада) ───────────────────
+    const chargePad = new THREE.Mesh(
+      new THREE.BoxGeometry(2.4, 0.08, 2.4),
+      new THREE.MeshStandardMaterial({
+        color: 0x00ff88, emissive: 0x00ff88,
+        emissiveIntensity: 0.35, roughness: 0.5,
+      })
+    );
+    // CHARGE_STATION = col=-2, row=-2 → world coords
+    const COLS_CS = 10, CW_CS = 2.0, GAP_X_CS = 0.5;
+    const ROWS_CS = 6,  CD_CS = 1.6, GAP_Z_CS = 1.4;
+    const OX_CS = -(COLS_CS * (CW_CS + GAP_X_CS)) / 2 + CW_CS / 2;
+    const OZ_CS = -(ROWS_CS * (CD_CS + GAP_Z_CS)) / 2 + CD_CS / 2;
+    chargePad.position.set(
+      OX_CS + (-2) * (CW_CS + GAP_X_CS),
+      0.04,
+      OZ_CS + (-2) * (CD_CS + GAP_Z_CS)
+    );
+    scene.add(chargePad);
+    // Значок молнии — столбик с жёлтым верхом
+    const chargePole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.06, 1.2, 8),
+      new THREE.MeshStandardMaterial({ color: 0x27ae60, roughness: 0.4 })
+    );
+    chargePole.position.set(chargePad.position.x, 0.64, chargePad.position.z);
+    scene.add(chargePole);
+    const chargeTop = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 10, 8),
+      new THREE.MeshStandardMaterial({
+        color: 0xffff00, emissive: 0xffff00, emissiveIntensity: 0.7,
+      })
+    );
+    chargeTop.position.set(chargePad.position.x, 1.3, chargePad.position.z);
+    scene.add(chargeTop);
+
     // Zone labels as colored planes
     const makePlane = (color, sx, sz, px, pz) => {
       const m = new THREE.Mesh(
@@ -270,17 +301,21 @@ export default function App() {
           const cell = target.data;
           setTooltip({
             title: cell.id,
-            details: `SKU: ${cell.sku || "—"} · Кол-во: ${cell.qty} · ${cell.hot ? "Горячая зона" : cell.fill ? "Заполнена" : "Свободна"}`,
+            details: `SKU: ${cell.sku || "—"} · ${cell.qty} ед. · ${cell.zone_type || "ambient"} · exp: ${cell.expiry_days_left ?? "—"} дн. · heat: ${cell.activity_count || 0}`,
             x: event.clientX,
             y: event.clientY,
           });
           return;
         }
-        if (target?.type === "Погрузчик") {
+        if (target?.type === "agv") {
           const agv = target.data;
+          const task = agv.route_task;
+          const taskDetails = task
+            ? ` · заказ ${task.order_id} · ${task.sku} · ${task.cell_id} · ETA ${task.eta_minutes} мин`
+            : "";
           setTooltip({
-            title: agv.id,
-            details: `Батарея: ${agv.battery}% · Цель: ${agv.tx}, ${agv.tz}`,
+            title: `Погрузчик-${agv.id}${agv.driver ? ` · ${agv.driver}` : ""}`,
+            details: `Батарея ${agv.battery}% · ${agv.status}${agv.idle ? " · разгрузка" : agv.waiting ? " · ждёт FIFO-задание" : ""}${taskDetails}`,
             x: event.clientX,
             y: event.clientY,
           });
@@ -305,7 +340,7 @@ export default function App() {
       if (target?.type !== "cell") return;
 
       const cell = target.data;
-      setOperatorMessage(`Планирование маршрута AGV-${selectedAgvRef.current} → ${cell.id}...`);
+      setOperatorMessage(`Планирование маршрута погрузчика-${selectedAgvRef.current} → ${cell.id}...`);
       setRouteTarget({ col: cell.col, row: cell.row });
       assignRouteRef.current?.(selectedAgvRef.current, cell.col, cell.row, cell.id);
     };
@@ -324,35 +359,48 @@ export default function App() {
 
     // Animate
     let raf;
+    let animTime = 0;
     const animate = () => {
       raf = requestAnimationFrame(animate);
+      animTime += 0.016;
       controls.update();
       const { agvMeshes } = sceneRef.current;
       Object.values(agvMeshes || {}).forEach((entry) => {
         if (!entry.backendPosition) return;
 
         const drift = entry.group.position.distanceTo(entry.backendPosition);
-        if (drift > 4.5) {
+        // Телепорт только при очень большом дрейфе (смена сценария)
+        if (drift > 6.0) {
           entry.group.position.copy(entry.backendPosition);
         }
 
         const previous = entry.group.position.clone();
         if (!entry.paused) {
-          entry.group.position.lerp(entry.backendPosition, 0.14);
+          // Адаптивный lerp — замедляется у цели, как настоящий водитель
+          const lerpFactor = drift < 0.3 ? 0.05 : drift < 1.5 ? 0.09 : 0.12;
+          entry.group.position.lerp(entry.backendPosition, lerpFactor);
         }
-        const delta = entry.group.position.clone().sub(previous);
-        if (delta.length() > 0.002) {
-          entry.targetRotation = Math.atan2(delta.x, delta.z);
+        const moved = entry.group.position.clone().sub(previous);
+        const speed = moved.length();
+
+        if (speed > 0.001) {
+          entry.targetRotation = Math.atan2(moved.x, moved.z);
+          // Вращение колёс пропорционально скорости
           entry.wheels?.forEach((wheel) => {
-            wheel.rotation.x += delta.length() * 8;
+            wheel.rotation.x += speed * 10;
           });
+          // Покачивание головы водителя при движении
+          if (entry.helmet) {
+            entry.helmet.position.y = 0.52 + Math.sin(animTime * 9) * 0.007 * Math.min(speed * 60, 1);
+          }
         }
 
         if (entry.targetRotation !== undefined) {
           const current = entry.group.rotation.y;
-          let delta = entry.targetRotation - current;
-          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-          entry.group.rotation.y = current + delta * 0.18;
+          let angleDelta = entry.targetRotation - current;
+          angleDelta = Math.atan2(Math.sin(angleDelta), Math.cos(angleDelta));
+          // Водители поворачивают плавнее чем роботы
+          entry.group.rotation.y = current + angleDelta * 0.11;
         }
       });
       renderer.render(scene, camera);
@@ -381,6 +429,7 @@ export default function App() {
     const OZ = -(ROWS * (CD + GAP_Z)) / 2 + CD / 2;
 
     const COLORS = { empty: 0x233142, full: 0x1a5fa5, hot: 0xc0392b };
+    const ZONE_COLORS = { cold: 0x27d4ff, ambient: 0x1a5fa5, dry: 0xd9a441 };
 
     // Update / create cell boxes
     data.cells.forEach((cell) => {
@@ -413,15 +462,19 @@ export default function App() {
 
       const mesh = cellMeshes[key];
       const pallet = palletMeshes[key];
+      const activity = Math.min((cell.activity_count || 0) / 24, 1);
+      const zoneColor = ZONE_COLORS[cell.zone_type] || COLORS.full;
       mesh.position.set(bx, by, bz);
       mesh.visible = true;
-      mesh.material.color.setHex(cell.fill ? (cell.hot ? COLORS.hot : COLORS.full) : COLORS.empty);
-      mesh.material.opacity = cell.fill ? 1 : 0.18;
+      mesh.material.color.setHex(cell.fill ? (cell.expiry_risk ? 0xf39c12 : zoneColor) : zoneColor);
+      mesh.material.opacity = cell.fill ? Math.min(1, 0.78 + activity * 0.22) : 0.16;
+      mesh.material.emissive?.setHex(cell.hot || activity > 0.65 ? 0x5a2200 : 0x000000);
+      mesh.material.emissiveIntensity = cell.hot || activity > 0.65 ? 0.28 + activity * 0.45 : 0;
       mesh.userData.data = cell;
 
       pallet.position.set(bx, by + 0.28, bz);
       pallet.visible = cell.fill;
-      pallet.material.color.setHex(cell.hot ? 0xe74c3c : 0x8d6e63);
+      pallet.material.color.setHex(cell.expiry_risk ? 0xf39c12 : cell.hot ? 0xe74c3c : 0x8d6e63);
     });
 
     const TOTAL_W = COLS * (CW + GAP_X);
@@ -655,6 +708,42 @@ export default function App() {
           return wheel;
         };
 
+        // ── Фигурка водителя ──────────────────────────────────────
+        const helmetColors = [0xff6b35, 0x2ec4b6, 0xe71d36, 0xffbe0b, 0x9b59b6, 0x1abc9c, 0xe67e22, 0x3498db];
+        const helmetColor = helmetColors[agv.id % helmetColors.length];
+        const helmet = new THREE.Mesh(
+          new THREE.SphereGeometry(0.13, 10, 8),
+          new THREE.MeshStandardMaterial({
+            color: helmetColor, roughness: 0.4,
+            emissive: helmetColor, emissiveIntensity: 0.18,
+          })
+        );
+        helmet.position.set(-0.05, 0.52, 0);
+
+        const torso = new THREE.Mesh(
+          new THREE.BoxGeometry(0.18, 0.20, 0.13),
+          new THREE.MeshStandardMaterial({ color: 0x2c3e50, roughness: 0.7 })
+        );
+        torso.position.set(-0.05, 0.36, 0);
+
+        const vest = new THREE.Mesh(
+          new THREE.BoxGeometry(0.20, 0.11, 0.15),
+          new THREE.MeshStandardMaterial({
+            color: 0xf39c12, roughness: 0.5,
+            emissive: 0xf39c12, emissiveIntensity: 0.08,
+          })
+        );
+        vest.position.set(-0.05, 0.385, 0);
+
+        const armMat = new THREE.MeshStandardMaterial({ color: 0x2c3e50, roughness: 0.7 });
+        const makeArm = (side) => {
+          const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.03, 0.17, 8), armMat);
+          arm.rotation.z = side * 0.55;
+          arm.position.set(-0.05 + side * 0.16, 0.34, 0);
+          return arm;
+        };
+        // ─────────────────────────────────────────────────────────
+
         const group = new THREE.Group();
         group.userData = { type: "agv", data: { ...agv, worldTx: targetX, worldTz: targetZ } };
         const wheels = [
@@ -664,18 +753,22 @@ export default function App() {
           makeWheel(-0.3, -0.28)
         ];
 
-        group.add(body, platform, cabin, light, ...wheels);
+        group.add(body, platform, cabin, light, helmet, torso, vest, makeArm(-1), makeArm(1), ...wheels);
         group.position.copy(backendPos);
         scene.add(group);
 
+        // routeLine — защита от пустого массива точек
+        const safeRoutePoints = routePath.length >= 2
+          ? routePath
+          : [backendPos.clone(), backendPos.clone().add(new THREE.Vector3(0.01, 0, 0))];
         const routeLine = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(routePath),
+          new THREE.BufferGeometry().setFromPoints(safeRoutePoints),
           new THREE.LineDashedMaterial({
-            color: 0x7fffd4,
-            dashSize: 0.55,
-            gapSize: 0.18,
+            color: 0x00e5ff,
+            dashSize: 0.45,
+            gapSize: 0.15,
             transparent: true,
-            opacity: 0.95,
+            opacity: 0.9,
             depthTest: false,
           })
         );
@@ -692,6 +785,7 @@ export default function App() {
           backendPosition: backendPos.clone(),
           targetRotation: group.rotation.y,
           wheels,
+          helmet,
           paused: agv.paused,
           routeActive: hasAssignedRoute,
         };
@@ -701,12 +795,17 @@ export default function App() {
         entry.backendPosition = backendPos.clone();
         entry.paused = agv.paused;
         entry.routeActive = hasAssignedRoute;
-        entry.routeLine.visible = hasAssignedRoute;
         entry.group.userData.data = { ...agv, worldTx: targetX, worldTz: targetZ };
         entry.group.children[0].material.color.setHex(batteryColor);
         entry.path = path;
-        entry.routeLine.geometry.setFromPoints(routePath);
+        // Защита от пустого массива — BufferGeometry требует минимум 2 точки
+        const updatePoints = routePath.length >= 2
+          ? routePath
+          : [entry.group.position.clone(), entry.group.position.clone().add(new THREE.Vector3(0.01, 0, 0))];
+        entry.routeLine.geometry.setFromPoints(updatePoints);
+        entry.routeLine.geometry.attributes.position.needsUpdate = true;
         entry.routeLine.computeLineDistances();
+        entry.routeLine.visible = hasAssignedRoute && routePath.length >= 2;
         drawRouteMarkers(entry, routePath, hasAssignedRoute);
       }
     });
@@ -733,7 +832,7 @@ export default function App() {
     }
 
     const headers = authHeaders({ "Content-Type": "application/json" });
-    setOperatorMessage(`Планирование маршрута Погрузчика-${agvId} → ${label}...`);
+    setOperatorMessage(`Планирование маршрута погрузчика-${agvId} → ${label}...`);
     fetch(`${API}/planner/assign`, {
       method: "POST",
       headers,
@@ -748,7 +847,7 @@ export default function App() {
           return;
         }
         const state = data.state;
-        setOperatorMessage(`Маршрут поставлен: Погрузчик-${agvId} → ${label}`);
+        setOperatorMessage(`Маршрут поставлен: погрузчик-${agvId} → ${label}`);
         if (state) {
           setMetrics(state.metrics);
           setInsights(state.insights);
@@ -871,6 +970,8 @@ export default function App() {
       setOperatorMessage("Маршрут складовщика доступен для operator, logistics и manager.");
       return;
     }
+    // Сначала очищаем старый маршрут — иначе точки остаются на сцене
+    clearWorkerRoute();
 
     const payload = {
       start: {
@@ -902,14 +1003,34 @@ export default function App() {
   };
 
   const clearWorkerRoute = () => {
+    const { scene } = sceneRef.current;
+    if (scene) {
+      // Убрать линию маршрута
+      if (sceneRef.current.workerRouteLine) {
+        scene.remove(sceneRef.current.workerRouteLine);
+        sceneRef.current.workerRouteLine.traverse?.((child) => {
+          child.geometry?.dispose();
+          child.material?.dispose();
+        });
+        sceneRef.current.workerRouteLine = null;
+      }
+      // Убрать все маркеры-точки (стартовый, финишный, промежуточные)
+      (sceneRef.current.workerRouteMarkers || []).forEach((marker) => {
+        scene.remove(marker);
+        marker.traverse?.((child) => {
+          child.geometry?.dispose();
+          child.material?.dispose();
+        });
+      });
+      sceneRef.current.workerRouteMarkers = [];
+    }
     setWorkerRoute(null);
-    renderWorkerRoute([]);
     setOperatorMessage("Маршрут складовщика очищен с 3D-сцены.");
   };
 
   const sendAgvCommand = (id, cmd, args = {}) => {
     const headers = authHeaders({ "Content-Type": "application/json" });
-    setOperatorMessage(`Команда Погрузчик-${id}: ${cmd}`);
+    setOperatorMessage(`Команда погрузчику-${id}: ${cmd}`);
     fetch(`${API}/agv/${id}/command`, {
       method: "POST",
       headers,
@@ -923,14 +1044,13 @@ export default function App() {
             : `Команда отклонена: ${data.error || "ошибка"}`);
           return;
         }
-        setOperatorMessage(`Команда принята: Погрузчик-${id} ${cmd}`);
+        setOperatorMessage(`Команда принята: погрузчик-${id} ${cmd}`);
         if (data.state) {
           setMetrics(data.state.metrics);
           setInsights(data.state.insights);
           setAnalysis(data.state.analysis);
           setReport(data.state.report);
           setWms(data.state.wms);
-          setFifo(data.state.fifo || null);
           setPlannerStatus(data.state.planner);
           updateScene(data.state);
           setAgvsList(data.state.agvs || []);
@@ -957,7 +1077,6 @@ export default function App() {
           setAnalysis(data.state.analysis);
           setReport(data.state.report);
           setWms(data.state.wms);
-          setFifo(data.state.fifo || null);
           setPlannerStatus(data.state.planner);
           setScenarioState(data.state.scenario);
           updateScene(data.state);
@@ -999,7 +1118,6 @@ export default function App() {
           setAnalysis(data.state.analysis);
           setReport(data.state.report);
           setWms(data.state.wms);
-          setFifo(data.state.fifo || null);
           setPlannerStatus(data.state.planner);
           updateScene(data.state);
           setAgvsList(data.state.agvs || []);
@@ -1180,7 +1298,7 @@ export default function App() {
 
         {canViewOperations && (
         <div className="section agv-control">
-          <div className="section-title">Loader Control Center</div>
+          <div className="section-title">Погрузчики с водителями</div>
           {operatorMessage && <div className="operator-message">{operatorMessage}</div>}
           {plannerStatus && (
             <div className="planner-strip">
@@ -1191,7 +1309,7 @@ export default function App() {
           <div className="route-editor-head">
             <div>
               <div className="route-title">Построение маршрута</div>
-              <div className="route-sub">Выберите Погрузчика, затем кликните по ячейке или задайте координаты</div>
+              <div className="route-sub">Выберите погрузчик, затем кликните по ячейке или задайте координаты маршрута водителю</div>
             </div>
             <button
               className={`toggle-btn ${routeEditMode ? "active" : ""}`}
@@ -1232,29 +1350,52 @@ export default function App() {
               Поставить
             </button>
           </div>
-          {agvsList && agvsList.length === 0 && <div style={{opacity:0.7}}>No Loaders</div>}
-          {agvsList && agvsList.map((a) => (
-            <div
-              key={a.id}
-              className={`agv-card ${selectedAgv === a.id ? "selected" : ""}`}
-              onClick={() => setSelectedAgv(a.id)}
-            >
-              <div className="agv-card-head">
-                <strong>Погрузчик-{a.id}</strong>
-                <span className={`agv-status ${a.paused ? "paused" : a.manual ? "manual" : ""}`}>{a.status}</span>
+          {agvsList && agvsList.length === 0 && <div style={{opacity:0.7}}>Нет погрузчиков</div>}
+          {agvsList && agvsList.map((a) => {
+            const task = a.route_task;
+            const routeLength = task?.route_steps ?? Math.max((a.route_path?.length || a.planned_path?.length || 1) - 1, 0);
+            return (
+              <div
+                key={a.id}
+                className={`agv-card ${selectedAgv === a.id ? "selected" : ""}`}
+                onClick={() => setSelectedAgv(a.id)}
+              >
+                <div className="agv-card-head">
+                  <strong>Погрузчик-{a.id}</strong>
+                  <span className={`agv-status ${a.paused ? "paused" : a.manual ? "manual" : ""}`}>{a.status}</span>
+                </div>
+                {a.driver && (
+                  <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <span>Водитель: {a.driver}</span>
+                    {a.idle && <span style={{ color: "#f39c12", fontWeight: 600 }}>разгрузка</span>}
+                    {a.waiting && !a.idle && <span style={{ color: "#7fb7ff", fontWeight: 600 }}>ждёт FIFO-заказ</span>}
+                    {a.status === "charging" && <span style={{ color: "#00ff88", fontWeight: 600 }}>зарядка</span>}
+                  </div>
+                )}
+                <div className="agv-detail">
+                  Батарея {a.battery}% · Цель: C{Math.round(a.tx)}/R{Math.round(a.tz)}
+                  {routeLength ? ` · кратчайший маршрут: ${routeLength} шагов` : ""}
+                </div>
+                {task ? (
+                  <div className="agv-detail" style={{ marginTop: 6, color: "#cfe3ff" }}>
+                    Auto FIFO: {task.order_id} · {task.sku} · {task.cell_id}
+                    {task.expiry_days_left !== null && task.expiry_days_left !== undefined ? ` · exp ${task.expiry_days_left} дн.` : ""}
+                    {task.eta_minutes ? ` · ETA ${task.eta_minutes} мин` : ""}
+                  </div>
+                ) : (
+                  <div className="agv-detail" style={{ marginTop: 6, opacity: 0.58 }}>
+                    Нет активной FIFO-задачи
+                  </div>
+                )}
+                <div className="agv-actions">
+                  <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "pause"); }}>Пауза</button>
+                  <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "resume"); }}>Продолжить</button>
+                  <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "charge"); }}>Зарядить</button>
+                  <button className="icon-btn danger" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "cancel"); }}>Отмена</button>
+                </div>
               </div>
-              <div className="agv-detail">
-                Battery {a.battery}% · Target {a.tx}, {a.tz}
-                {a.planned_path?.length ? ` · Route ${a.planned_path.length} nodes` : ""}
-              </div>
-              <div className="agv-actions">
-                <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "pause"); }}>Pause</button>
-                <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "resume"); }}>Resume</button>
-                <button className="icon-btn" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "charge"); }}>Charge</button>
-                <button className="icon-btn danger" disabled={!canOperate} onClick={(e) => { e.stopPropagation(); sendAgvCommand(a.id, "cancel"); }}>Убрать</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         )}
 
@@ -1272,78 +1413,6 @@ export default function App() {
         {canViewPlanning && report && <ReportPanel report={report} onExport={exportReport} />}
         {canViewInsights && insights && <InsightsPanel insights={insights} />}
         {canViewWms && wms && <WmsPanel wms={wms} />}
-
-        {/* ── FIFO панель ─────────────────────────────────────── */}
-        {(canViewOperations || canViewWms) && fifo && (
-          <div className="section" style={{padding: "12px 14px"}}>
-            <div className="section-title">FIFO — очередь задач</div>
-
-            {/* Статистика */}
-            <div style={{display:"flex", gap:8, marginBottom:10}}>
-              {[
-                {val: fifo.queue_length,      lbl: "в очереди"},
-                {val: fifo.total_dispatched,  lbl: "выдано задач"},
-                {val: fifo.fifo_shipped,      lbl: "отгружено"},
-              ].map(({val, lbl}) => (
-                <div key={lbl} style={{flex:1, background:"rgba(255,255,255,0.05)", borderRadius:6, padding:"6px 8px", textAlign:"center"}}>
-                  <div style={{fontSize:18, fontWeight:600, color:"#7fffd4", lineHeight:1}}>{val}</div>
-                  <div style={{fontSize:10, opacity:0.55, marginTop:3}}>{lbl}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Очередь задач AGV */}
-            {fifo.task_queue && fifo.task_queue.length > 0 ? (
-              <div style={{display:"flex", flexDirection:"column", gap:4, marginBottom:10}}>
-                {fifo.task_queue.map((task) => (
-                  <div key={task.seq} style={{display:"flex", alignItems:"center", gap:6, background:"rgba(127,255,212,0.07)", borderRadius:5, padding:"4px 8px", fontSize:12}}>
-                    <span style={{color:"#7fffd4", fontWeight:600, minWidth:22}}>#{task.queue_pos}</span>
-                    <span style={{color:"#a0c4ff", minWidth:52}}>AGV-{task.agv_id}</span>
-                    <span style={{flex:1, opacity:0.8}}>→ C{task.col} / R{task.row}</span>
-                    {task.order_id && <span style={{opacity:0.45, fontSize:11}}>{task.order_id}</span>}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div style={{fontSize:12, opacity:0.45, marginBottom:10, fontStyle:"italic"}}>
-                Очередь пуста — задачи выдаются сразу
-              </div>
-            )}
-
-            {/* Заказы WMS в FIFO-порядке */}
-            {wms && wms.orders && wms.orders.length > 0 && (
-              <>
-                <div style={{fontSize:11, opacity:0.5, marginBottom:5, textTransform:"uppercase", letterSpacing:"0.04em"}}>
-                  Заказы — порядок обработки
-                </div>
-                <div style={{display:"flex", flexDirection:"column", gap:3}}>
-                  {wms.orders.slice(0, 7).map((order, i) => {
-                    const statusColors = {pending:"#f39c12", picking:"#3498db", shipped:"#27ae60"};
-                    const statusLabels = {pending:"ожидает", picking:"пикинг", shipped:"отгружен"};
-                    return (
-                      <div key={order.id} style={{
-                        display:"flex", alignItems:"center", gap:6,
-                        padding:"3px 8px", borderRadius:5, fontSize:11,
-                        background: i === 0 ? "rgba(243,156,18,0.12)" : "rgba(255,255,255,0.03)",
-                        borderLeft: i === 0 ? "2px solid #f39c12" : "2px solid transparent",
-                      }}>
-                        <span style={{opacity:0.4, minWidth:14}}>{i+1}</span>
-                        <span style={{color:"#a0c4ff", minWidth:54}}>{order.id}</span>
-                        <span style={{flex:1, opacity:0.65, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{order.sku}</span>
-                        <span style={{color: statusColors[order.status] || "#aaa", fontWeight:500}}>
-                          {statusLabels[order.status] || order.status}
-                        </span>
-                        {order.cell_id && (
-                          <span style={{opacity:0.4, fontSize:10}}>→ {order.cell_id}</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-        )}
 
         {(canOperate || canManage) && <EventLog events={events} />}
       </aside>

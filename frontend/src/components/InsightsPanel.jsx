@@ -20,6 +20,21 @@ export default function InsightsPanel({ insights }) {
           <div className="metric-val">{insights.low_battery.length}</div>
           <div className="metric-sub">менее 30%</div>
         </div>
+        <div className="metric">
+          <div className="metric-label">Предиктивное ТО</div>
+          <div className="metric-val">{insights.maintenance_due?.length || 0}</div>
+          <div className="metric-sub">wear / due date</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Expiry risk</div>
+          <div className="metric-val">{insights.expiring_soon?.length || 0}</div>
+          <div className="metric-sub">до 30 дней</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Конгестия</div>
+          <div className="metric-val">{insights.congestion?.length || 0}</div>
+          <div className="metric-sub">ожидание в проходах</div>
+        </div>
       </div>
 
       <div className="insights-list">
@@ -29,6 +44,17 @@ export default function InsightsPanel({ insights }) {
           </div>
         ))}
       </div>
+
+      {insights.hot_cells?.length > 0 && (
+        <div className="insights-list">
+          <div className="section-title">Тепловая карта активности</div>
+          {insights.hot_cells.slice(0, 5).map((cell) => (
+            <div key={cell.id} className="insight-item">
+              {cell.id}: {cell.activity_count} событий · {cell.zone_type} · {cell.sku || "empty"}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

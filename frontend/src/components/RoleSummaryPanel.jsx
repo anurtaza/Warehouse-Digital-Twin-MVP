@@ -1,6 +1,6 @@
 const ROLE_LABELS = {
   manager: "Менеджер склада",
-  operator: "Оператор Погрузчика",
+  operator: "Оператор погрузчиков",
   logistics: "Логист",
   viewer: "Наблюдатель",
 };
@@ -21,7 +21,7 @@ export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
     operator: {
       title: "Операционная готовность",
       detail: insights.low_battery.length > 0
-        ? `Низкий заряд у ${insights.low_battery.length} Погрузчика, план зарядки.`
+        ? `Низкий заряд у ${insights.low_battery.length} погрузчика, план зарядки.`
         : "Погрузчики готовы к работе, никаких аварий не обнаружено.",
       cards: [
         { label: "Погрузчиков активных", value: `${metrics.agv_active}/${metrics.agv_total}` },
@@ -43,7 +43,7 @@ export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
       detail: "Доступен мониторинг склада без операторских команд и изменения сценариев.",
       cards: [
         { label: "Заполняемость", value: `${metrics.fill_pct}%` },
-        { label: "Погрузчик онлайн", value: `${metrics.agv_active}/${metrics.agv_total}` },
+        { label: "Погрузчики онлайн", value: `${metrics.agv_active}/${metrics.agv_total}` },
         { label: "Сценарий", value: metrics.scenario },
       ],
     },

@@ -1,6 +1,6 @@
 const ROLES = [
   { id: "manager", label: "Менеджер склада", access: "Все KPI, сценарии, оптимизация, погрузчики" },
-  { id: "operator", label: "Оператор Погрузчика", access: "Погручики, маршруты, логи, текущие задачи" },
+  { id: "operator", label: "Оператор погрузчиков", access: "Погрузчики, водители, маршруты и текущие задачи" },
   { id: "logistics", label: "Логист", access: "WMS, заказы, SKU, throughput, отчеты" },
   { id: "viewer", label: "Наблюдатель", access: "Только обзор 3D-сцены и общих KPI" },
 ];

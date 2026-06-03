@@ -97,6 +97,7 @@ def set_scenario(name):
     if name not in valid:
         return jsonify({"error": "Unknown scenario"}), 400
     sim.set_scenario(name)
+    planner.reset()
     state = sim.get_state()
     state["planner"] = planner.snapshot()
     socketio.emit("scenario_changed", {"scenario": name})
@@ -131,12 +132,15 @@ def agv_command(agv_id):
     agv = next((a for a in sim.agvs if a.id == agv_id), None)
     if not agv:
         return jsonify({"error": "agv_not_found"}), 404
+    if cmd in {"cancel", "goto", "charge", "home"}:
+        sim.release_task_for_agv(agv_id)
+        planner.clear_agent(agv_id)
     agv.enqueue_command(cmd, args)
     state = sim.get_state()
     state["planner"] = planner.snapshot()
     socketio.emit("agv_command", {"id": agv_id, "cmd": cmd, "args": args})
     socketio.emit("state", state)
-    sim._log_event(f"{request.user['sub']} → AGV-{agv_id}: {cmd}", "info")
+    sim._log_event(f"{request.user['sub']} → погрузчик-{agv_id}: {cmd}", "info")
     return jsonify({"ok": True, "id": agv_id, "cmd": cmd, "state": state})
 
 
@@ -154,11 +158,12 @@ def planner_assign():
         return jsonify({'error': 'agv_not_found'}), 404
     if not (0 <= int(col) < sim.cols and 0 <= int(row) < sim.rows):
         return jsonify({'error': 'target_out_of_bounds'}), 400
+    sim.release_task_for_agv(agv_id)
     path = planner.assign(agv, col, row, sim)
     if not path:
         return jsonify({'error': 'no_path'}), 409
     agv.assign_route(path, (int(col), int(row)), assigned_by=request.user["sub"])
-    sim._log_event(f"{request.user['sub']} назначил AGV-{agv_id} маршрут → C{col}/R{row}", "info")
+    sim._log_event(f"{request.user['sub']} назначил погрузчику-{agv_id} маршрут → C{col}/R{row}", "info")
     state = sim.get_state()
     state["planner"] = planner.snapshot()
     socketio.emit('state', state)
@@ -232,7 +237,7 @@ def on_agv_command(data):
 # ─── Background simulation loop ────────────────────────────────────
 def simulation_loop():
     while True:
-        sim.tick()
+        sim.tick(planner)
         state = sim.get_state()
         state["planner"] = planner.snapshot()
         socketio.emit("state", state)

@@ -1,5 +1,7 @@
 export default function MetricsBar({ metrics }) {
   const alertColor = metrics.hot_zones >= 5 ? "#c0392b" : metrics.hot_zones >= 3 ? "#e67e22" : "#27ae60";
+  const fillDelta = metrics.benchmarks?.fill_delta ?? 0;
+  const throughputDelta = metrics.benchmarks?.throughput_delta ?? 0;
   return (
     <div className="section">
       <div className="section-title">Метрики в реальном времени</div>
@@ -23,6 +25,26 @@ export default function MetricsBar({ metrics }) {
           <div className="metric-label">Узких мест</div>
           <div className="metric-val" style={{ color: alertColor }}>{metrics.hot_zones}</div>
           <div className="metric-sub">{metrics.throughput} ед/ч</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Fill rate vs CCI</div>
+          <div className="metric-val">{fillDelta > 0 ? `+${fillDelta}` : fillDelta}%</div>
+          <div className="metric-sub">цель {metrics.benchmarks?.fill_target ?? 90}%</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Throughput vs план</div>
+          <div className="metric-val">{throughputDelta > 0 ? `+${throughputDelta}` : throughputDelta}</div>
+          <div className="metric-sub">цель {metrics.benchmarks?.throughput_target ?? 60} ед/ч</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">FIFO compliance</div>
+          <div className="metric-val">{metrics.benchmarks?.fifo_compliance ?? 100}%</div>
+          <div className="metric-sub">FEFO по сроку годности</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">CCI риски</div>
+          <div className="metric-val">{(metrics.expiring_soon || 0) + (metrics.maintenance_due || 0) + (metrics.congestion_points || 0)}</div>
+          <div className="metric-sub">expiry / ТО / конгестия</div>
         </div>
       </div>
     </div>

@@ -12,6 +12,11 @@ class RoutePlanner:
         self.edge_reservations = {}
         self.agent_reservations = {}
 
+    def reset(self):
+        self.vertex_reservations.clear()
+        self.edge_reservations.clear()
+        self.agent_reservations.clear()
+
     def clamp_node(self, col, row):
         return (
             max(0, min(self.cols - 1, int(round(col)))),
