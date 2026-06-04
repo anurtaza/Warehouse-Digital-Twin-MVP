@@ -235,32 +235,6 @@ docker compose up -d
 - `FLASK_ENV=production` — используется в Docker Compose.
 - `VITE_API_URL` — URL backend для отдельного hosted-фронтенда. В Docker Compose обычно не нужен, потому что Nginx проксирует `/api` и `/socket.io`.
 
-## Бесплатный деплой
-
-Самый простой бесплатный вариант для MVP — Render.
-
-### Вариант A — два сервиса на Render
-
-1. Залейте проект на GitHub.
-2. Создайте backend как `Web Service`:
-   - Root Directory: `backend`
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `python app.py`
-   - Environment: `JWT_SECRET=<ваш_секрет>`
-3. После деплоя backend получите URL вида:
-   - `https://warehouse-backend.onrender.com`
-4. Создайте frontend как `Static Site`:
-   - Root Directory: `frontend`
-   - Build Command: `npm install && npm run build`
-   - Publish Directory: `dist`
-   - Environment: `VITE_API_URL=https://warehouse-backend.onrender.com`
-
-Минус бесплатного backend на Render: сервис может засыпать после простоя и просыпаться несколько секунд при первом HTTP/WebSocket запросе.
-
-### Вариант B — один Docker web service
-
-Если хотите деплоить одним сервисом, нужен единый production Dockerfile, который собирает frontend и запускает backend с отдачей статики/прокси. Текущий `docker-compose.yml` удобен для локального запуска, но многие бесплатные PaaS не запускают `docker compose` напрямую как production-окружение.
-
 ### Как перевести проект в реальное производство
 
 1. **Соберите контейнеры** с `docker compose build --no-cache`.
@@ -296,7 +270,6 @@ docker compose up -d
 | Реальное время | Socket.IO (WebSocket) |
 | Бэкенд | Python Flask + Flask-SocketIO |
 | Локальный деплой | Docker Compose + Nginx |
-| Бесплатный хостинг | Render Web Service + Render Static Site |
 
 ## Что улучшено в MVP
 
