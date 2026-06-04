@@ -1,5 +1,5 @@
-## 🏭 TwinStock — MVP
-# Real-time intelligence for your warehouse 
+# 🏭 TwinStock — MVP
+## Real-time intelligence for your warehouse 
 
 3D цифровой двойник склада на Python + React + Three.js: симуляция WMS, погрузчики с водителями, FIFO/FEFO, маршрутизация по коридорам, WebSocket-обновления и адаптивный интерфейс для ПК и телефона.
 
