@@ -2,6 +2,8 @@
 Digital Twin Warehouse — Flask + SocketIO backend
 Запуск: python app.py
 """
+import eventlet
+eventlet.monkey_patch()
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO
 from flask_cors import CORS
@@ -13,10 +15,11 @@ import jwt
 from simulator import WarehouseSimulator
 from planner import planner
 
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("JWT_SECRET", "warehouse-twin-secret")
 CORS(app, origins="*")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 sim = WarehouseSimulator(cols=10, rows=6, shelves=4)
 
@@ -26,6 +29,11 @@ USERS = {
     "manager": {"password": "managerpass", "role": "manager"},
     "logistics": {"password": "logisticspass", "role": "logistics"},
     "viewer": {"password": "viewerpass", "role": "viewer"},
+    # Аккаунты для каждого погрузчика — водители логинятся и видят только СВОИ цели/маршруты
+    "forklift-0": {"password": "forklift0pass", "role": "forklift", "agv_id": 0},
+    "forklift-1": {"password": "forklift1pass", "role": "forklift", "agv_id": 1},
+    "forklift-2": {"password": "forklift2pass", "role": "forklift", "agv_id": 2},
+    "forklift-3": {"password": "forklift3pass", "role": "forklift", "agv_id": 3},
 }
 
 def requires_role(*roles):
@@ -62,12 +70,15 @@ def login():
         'role': role,
         'exp': datetime.utcnow() + timedelta(hours=8)
     }
+    # Если это аккаунт погрузчика (forklift-X), добавить agv_id в токен
+    if role == 'forklift' and 'agv_id' in USERS[username]:
+        payload['agv_id'] = USERS[username]['agv_id']
     token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
     return jsonify({'token': token, 'role': role, 'username': username})
 
 
 @app.route("/api/me")
-@requires_role("viewer", "operator", "manager", "logistics")
+@requires_role("viewer", "operator", "manager", "logistics", "forklift")
 def me():
     return jsonify(request.user)
 
@@ -77,12 +88,53 @@ def me():
 def get_state():
     state = sim.get_state()
     state["planner"] = planner.snapshot()
+    
+    # Если запрос от водителя погрузчика (forklift роль), показать только ЕГО погрузчик
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        try:
+            token = auth.split(" ", 1)[1]
+            payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+            if payload.get("role") == "forklift" and "agv_id" in payload:
+                agv_id = payload["agv_id"]
+                my_agv = next((a for a in state.get("agvs", []) if a["id"] == agv_id), None)
+                if my_agv:
+                    state["agvs"] = [my_agv]  # Показать только свой погрузчик
+                    state["role_restricted"] = True
+                    state["driver_agv_id"] = agv_id
+        except Exception:
+            pass
+    
     return jsonify(state)
 
 
 @app.route("/api/metrics")
 def get_metrics():
-    return jsonify(sim.get_metrics())
+    metrics = sim.get_metrics()
+    
+    # Если запрос от водителя, добавить информацию только о ЕГО батарее и статусе
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        try:
+            token = auth.split(" ", 1)[1]
+            payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+            if payload.get("role") == "forklift" and "agv_id" in payload:
+                agv_id = payload["agv_id"]
+                my_agv = next((a for a in sim.agvs if a.id == agv_id), None)
+                if my_agv:
+                    metrics["my_agv"] = {
+                        "id": my_agv.id,
+                        "battery": round(my_agv.battery),
+                        "status": my_agv.status,
+                        "driver": my_agv.driver,
+                        "route_goal": my_agv.route_goal,
+                        "assigned_by": my_agv.assigned_by,
+                        "route_task": my_agv.route_task,
+                    }
+        except Exception:
+            pass
+    
+    return jsonify(metrics)
 
 
 @app.route("/api/events")

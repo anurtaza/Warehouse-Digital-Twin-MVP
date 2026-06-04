@@ -3,6 +3,7 @@ const ROLES = [
   { id: "operator", label: "Оператор погрузчиков", access: "Погрузчики, водители, маршруты и текущие задачи" },
   { id: "logistics", label: "Логист", access: "WMS, заказы, SKU, throughput, отчеты" },
   { id: "viewer", label: "Наблюдатель", access: "Только обзор 3D-сцены и общих KPI" },
+  { id: "forklift", label: "Водитель погрузчика", access: "Кабина с целями, маршрутом и батареей" },
 ];
 
 export default function RolePanel({ role }) {

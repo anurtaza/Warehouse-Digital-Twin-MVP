@@ -45,6 +45,7 @@ export default function App() {
   const [routeEditMode, setRouteEditMode] = useState(false);
   const [operatorMessage, setOperatorMessage] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(360);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const socketRef = useRef(null);
   const raycasterRef = useRef(new THREE.Raycaster());
   const pointerRef = useRef(new THREE.Vector2());
@@ -57,13 +58,14 @@ export default function App() {
   const tokenRef = useRef(null);
   const [userRole, setUserRole] = useState(null);
   const userRoleRef = useRef(null);
-  const [loginUser, setLoginUser] = useState("manager");
-  const [loginPass, setLoginPass] = useState("managerpass");
+  const [loginUser, setLoginUser] = useState("forklift-0");
+  const [loginPass, setLoginPass] = useState("forklift0pass");
 
   const activeRole = userRole || "viewer";
   const canOperate = activeRole === "operator" || activeRole === "manager";
   const canManage = activeRole === "manager";
   const isLogistics = activeRole === "logistics";
+  const isForklift = activeRole === "forklift";
   const canViewOperations = canOperate || canManage;
   const canViewPlanning = canManage || isLogistics;
   const canViewWms = canManage || isLogistics;
@@ -103,11 +105,20 @@ export default function App() {
     socket.on("disconnect", () => setConnected(false));
 
     socket.on("state", (data) => {
-      setMetrics(data.metrics);
-      setInsights(data.insights);
-      setAnalysis(data.analysis);
-      setReport(data.report);
-      setWms(data.wms);
+      // Forklift водители видят только свого AGV, не получают WMS
+      if (activeRole === "forklift") {
+        setMetrics(null);
+        setInsights(null);
+        setAnalysis(null);
+        setReport(null);
+        setWms(null);
+      } else {
+        setMetrics(data.metrics);
+        setInsights(data.insights);
+        setAnalysis(data.analysis);
+        setReport(data.report);
+        setWms(data.wms);
+      }
       setPlannerStatus(data.planner);
       setScenarioState(data.scenario);
       updateScene(data);
@@ -121,11 +132,20 @@ export default function App() {
     fetch(`${API}/state`)
       .then((res) => res.json())
       .then((data) => {
-        setMetrics(data.metrics);
-        setInsights(data.insights);
-        setAnalysis(data.analysis);
-        setReport(data.report);
-        setWms(data.wms);
+        // Forklift водители видят только своего AGV
+        if (userRole === "forklift") {
+          setMetrics(null);
+          setInsights(null);
+          setAnalysis(null);
+          setReport(null);
+          setWms(null);
+        } else {
+          setMetrics(data.metrics);
+          setInsights(data.insights);
+          setAnalysis(data.analysis);
+          setReport(data.report);
+          setWms(data.wms);
+        }
         setPlannerStatus(data.planner);
         setScenarioState(data.scenario);
         updateScene(data);
@@ -183,19 +203,35 @@ export default function App() {
     const scene = new THREE.Scene();
     scene.fog = new THREE.Fog(0x0f1923, 40, 90);
 
+    const configureCameraForViewport = () => {
+      const isPhone = window.matchMedia("(max-width: 700px)").matches;
+      if (isPhone) {
+        camera.fov = 58;
+        camera.position.set(31, 31, 39);
+        controls.target.set(0, 1.6, 0);
+        controls.minDistance = 16;
+        controls.maxDistance = 95;
+      } else {
+        camera.fov = 50;
+        camera.position.set(22, 24, 28);
+        controls.target.set(0, 2, 0);
+        controls.minDistance = 8;
+        controls.maxDistance = 70;
+      }
+      camera.updateProjectionMatrix();
+      controls.update();
+    };
+
     // Camera
     const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 200);
-    camera.position.set(22, 24, 28);
     camera.lookAt(0, 2, 0);
 
     // Controls
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.07;
-    controls.target.set(0, 2, 0);
     controls.maxPolarAngle = Math.PI / 2.1;
-    controls.minDistance = 8;
-    controls.maxDistance = 70;
+    configureCameraForViewport();
 
     // Lights
     scene.add(new THREE.AmbientLight(0x334455, 0.9));
@@ -353,7 +389,7 @@ export default function App() {
       const w2 = el.clientWidth, h2 = el.clientHeight;
       renderer.setSize(w2, h2);
       camera.aspect = w2 / h2;
-      camera.updateProjectionMatrix();
+      configureCameraForViewport();
     };
     window.addEventListener("resize", onResize);
 
@@ -579,20 +615,74 @@ export default function App() {
       return orthogonalizePath(path);
     };
 
-    const buildAisleSequencePath = (points) => {
-      if (points.length <= 1) return points.map((point) => point.clone());
-      const sequence = [];
-      for (let index = 0; index < points.length - 1; index += 1) {
-        const segment = buildAislePath(points[index], points[index + 1]);
-        segment.forEach((point) => {
-          const last = sequence[sequence.length - 1];
-          if (!last || last.distanceTo(point) > 0.05) sequence.push(point);
-        });
+    const normalizeRouteNodes = (nodes = []) => nodes
+      .map(([col, row]) => [Number(col), Number(row)])
+      .filter(([col, row]) => Number.isFinite(col) && Number.isFinite(row))
+      .filter(([col, row], index, list) => {
+        if (index === 0) return true;
+        const [prevCol, prevRow] = list[index - 1];
+        return col !== prevCol || row !== prevRow;
+      });
+
+    const simplifyRouteNodes = (nodes) => {
+      const normalized = normalizeRouteNodes(nodes);
+      if (normalized.length <= 2) return normalized;
+
+      const simplified = [normalized[0]];
+      for (let index = 1; index < normalized.length - 1; index += 1) {
+        const [prevCol, prevRow] = normalized[index - 1];
+        const [col, row] = normalized[index];
+        const [nextCol, nextRow] = normalized[index + 1];
+        const prevDir = [Math.sign(col - prevCol), Math.sign(row - prevRow)];
+        const nextDir = [Math.sign(nextCol - col), Math.sign(nextRow - row)];
+        if (prevDir[0] !== nextDir[0] || prevDir[1] !== nextDir[1]) {
+          simplified.push([col, row]);
+        }
       }
-      return sequence;
+      simplified.push(normalized[normalized.length - 1]);
+      return simplified;
     };
 
-    const displayRoutePath = (path) => path.map((point) => new THREE.Vector3(point.x, 0.9, point.z));
+    const buildCorridorRoutePath = (nodes) => {
+      const turns = simplifyRouteNodes(nodes);
+      if (turns.length <= 1) {
+        return turns.map(([col, row]) => agvPoint(col, row, 0.22));
+      }
+
+      const nodePoint = ([col, row], y = 0.22) => agvPoint(col, row, y);
+      const orientation = (from, to) => Math.abs(to[0] - from[0]) >= Math.abs(to[1] - from[1]) ? "h" : "v";
+      const addPoint = (path, point) => {
+        const last = path[path.length - 1];
+        if (!last || last.distanceTo(point) > 0.05) path.push(point);
+      };
+      const corridorPoint = (node, orient) => {
+        const center = nodePoint(node);
+        return orient === "h"
+          ? new THREE.Vector3(center.x, center.y, nearest(center.z, corridorZs))
+          : new THREE.Vector3(nearest(center.x, corridorXs), center.y, center.z);
+      };
+      const turnPoint = (node) => {
+        const center = nodePoint(node);
+        return new THREE.Vector3(nearest(center.x, corridorXs), center.y, nearest(center.z, corridorZs));
+      };
+
+      const path = [];
+      const firstOrientation = orientation(turns[0], turns[1]);
+      addPoint(path, nodePoint(turns[0]));
+      addPoint(path, corridorPoint(turns[0], firstOrientation));
+
+      for (let index = 1; index < turns.length - 1; index += 1) {
+        addPoint(path, turnPoint(turns[index]));
+      }
+
+      const lastOrientation = orientation(turns[turns.length - 2], turns[turns.length - 1]);
+      addPoint(path, corridorPoint(turns[turns.length - 1], lastOrientation));
+      addPoint(path, nodePoint(turns[turns.length - 1]));
+
+      return orthogonalizePath(path);
+    };
+
+    const displayRoutePath = (path) => path.map((point) => new THREE.Vector3(point.x, 0.28, point.z));
 
     const clearRouteMarkers = (entry) => {
       entry.routeMarkers?.forEach((marker) => {
@@ -616,15 +706,17 @@ export default function App() {
         depthTest: false,
       });
 
+      let finalSegment = null;
       for (let index = 0; index < points.length - 1; index += 1) {
         const start = points[index];
         const end = points[index + 1];
         const segment = end.clone().sub(start);
         const length = segment.length();
         if (length < 0.05) continue;
+        finalSegment = { start, end, segment };
 
         const tube = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.055, 0.055, length, 10),
+          new THREE.CylinderGeometry(0.075, 0.075, length, 12),
           material.clone()
         );
         tube.position.copy(start).add(end).multiplyScalar(0.5);
@@ -636,6 +728,47 @@ export default function App() {
         scene.add(tube);
         entry.routeMarkers.push(tube);
       }
+
+      if (finalSegment) {
+        const arrow = new THREE.ArrowHelper(
+          finalSegment.segment.clone().normalize(),
+          finalSegment.end,
+          0.75,
+          0x00ffff,
+        );
+        scene.add(arrow);
+        entry.routeMarkers.push(arrow);
+      }
+
+      const startMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.34, 18, 14),
+        new THREE.MeshStandardMaterial({
+          color: 0x00ff00,
+          emissive: 0x00ff00,
+          emissiveIntensity: 0.9,
+          depthTest: false,
+        })
+      );
+      startMarker.position.copy(points[0]);
+      startMarker.position.y = 0.75;
+      startMarker.renderOrder = 14;
+      scene.add(startMarker);
+      entry.routeMarkers.push(startMarker);
+
+      const endMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.38, 18, 14),
+        new THREE.MeshStandardMaterial({
+          color: 0xff0000,
+          emissive: 0xff0000,
+          emissiveIntensity: 0.9,
+          depthTest: false,
+        })
+      );
+      endMarker.position.copy(points[points.length - 1]);
+      endMarker.position.y = 0.78;
+      endMarker.renderOrder = 14;
+      scene.add(endMarker);
+      entry.routeMarkers.push(endMarker);
     };
 
     const chooseDriveIndex = (groupPosition, path, previousIndex = 1) => {
@@ -667,11 +800,9 @@ export default function App() {
       const targetPos = new THREE.Vector3(targetX, 0.18, targetZ);
       const displayNodes = agv.route_path?.length ? agv.route_path : agv.planned_path;
       const hasAssignedRoute = Boolean(displayNodes?.length > 1 && (agv.planned_path?.length || agv.hold_position || agv.manual));
-      const plannedPoints = displayNodes?.length
-        ? displayNodes.map(([col, row]) => agvPoint(col, row, 0.18))
-        : [];
+      const canSeeRoute = userRoleRef.current !== "forklift" || `forklift-${agv.id}` === loginUser;
       const path = hasAssignedRoute
-        ? orthogonalizePath(plannedPoints)
+        ? buildCorridorRoutePath(displayNodes)
         : [backendPos];
       const routePath = displayRoutePath(path);
 
@@ -774,7 +905,7 @@ export default function App() {
         );
         routeLine.renderOrder = 10;
         routeLine.computeLineDistances();
-        routeLine.visible = hasAssignedRoute;
+        routeLine.visible = hasAssignedRoute && canSeeRoute;
         scene.add(routeLine);
 
         entry = {
@@ -789,7 +920,7 @@ export default function App() {
           paused: agv.paused,
           routeActive: hasAssignedRoute,
         };
-        drawRouteMarkers(entry, routePath, hasAssignedRoute);
+        drawRouteMarkers(entry, routePath, hasAssignedRoute && canSeeRoute);
         agvMeshes[key] = entry;
       } else {
         entry.backendPosition = backendPos.clone();
@@ -805,8 +936,8 @@ export default function App() {
         entry.routeLine.geometry.setFromPoints(updatePoints);
         entry.routeLine.geometry.attributes.position.needsUpdate = true;
         entry.routeLine.computeLineDistances();
-        entry.routeLine.visible = hasAssignedRoute && routePath.length >= 2;
-        drawRouteMarkers(entry, routePath, hasAssignedRoute);
+        entry.routeLine.visible = hasAssignedRoute && canSeeRoute &&routePath.length >= 2;
+        drawRouteMarkers(entry, routePath, hasAssignedRoute && canSeeRoute);
       }
     });
 
@@ -1175,8 +1306,27 @@ export default function App() {
   };
 
   return (
-    <div className="layout" style={{ gridTemplateColumns: `${sidebarWidth}px 1fr` }}>
-      <aside className="sidebar">
+    <div className="layout" style={{ "--sidebar-width": `${sidebarWidth}px` }}>
+      <button
+        className="mobile-menu-btn"
+        type="button"
+        aria-label={mobileMenuOpen ? "Закрыть меню" : "Открыть меню"}
+        aria-expanded={mobileMenuOpen}
+        onClick={() => setMobileMenuOpen((value) => !value)}
+      >
+        <span />
+        <span />
+        <span />
+      </button>
+      {mobileMenuOpen && (
+        <button
+          className="mobile-sidebar-backdrop"
+          type="button"
+          aria-label="Закрыть меню"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+      <aside className={`sidebar ${mobileMenuOpen ? "open" : ""}`}>
         <button
           className="sidebar-resizer"
           type="button"
@@ -1209,12 +1359,24 @@ export default function App() {
               <select value={loginUser} onChange={(e) => {
                 const value = e.target.value;
                 setLoginUser(value);
-                setLoginPass(`${value}pass`);
+                // Для погрузчиков пароль = forkliftXpass, для остальных = userpass
+                const pass = value.startsWith("forklift") 
+                  ? `${value.replace("-", "")}pass` 
+                  : `${value}pass`;
+                setLoginPass(pass);
               }}>
-                <option value="manager">manager</option>
-                <option value="operator">operator</option>
-                <option value="logistics">logistics</option>
-                <option value="viewer">viewer</option>
+                <optgroup label="Администратор">
+                  <option value="manager">manager</option>
+                  <option value="operator">operator</option>
+                  <option value="logistics">logistics</option>
+                  <option value="viewer">viewer</option>
+                </optgroup>
+                <optgroup label="Водители погрузчиков">
+                  <option value="forklift-0">forklift-0</option>
+                  <option value="forklift-1">forklift-1</option>
+                  <option value="forklift-2">forklift-2</option>
+                  <option value="forklift-3">forklift-3</option>
+                </optgroup>
               </select>
               <input value={loginPass} onChange={(e) => setLoginPass(e.target.value)} type="password" />
               <button className="action-btn" onClick={login}>Войти</button>
@@ -1296,9 +1458,89 @@ export default function App() {
         </div>
         )}
 
+        {isForklift && (
+        <div className="section forklift-dashboard">
+          <div className="section-title">Кабина погрузчика</div>
+          {agvsList.length > 0 ? (
+            agvsList
+              .filter(agv => `forklift-${agv.id}` === loginUser)
+              .map(agv => (
+              <div key={agv.id} className="forklift-card">
+                <div className="forklift-header">
+                  <div className="forklift-id">🏗️ Погрузчик #{agv.id}</div>
+                  <div className={`forklift-status ${agv.status}`}>{agv.status}</div>
+                </div>
+                <div className="forklift-info">
+                  <div className="battery-section">
+                    <span className="battery-label">🔋 Батарея: {agv.battery}%</span>
+                    <div className="battery-bar-container">
+                      <div className="battery-bar-fill" style={{width: `${agv.battery}%`, backgroundColor: agv.battery > 50 ? '#2a7a3b' : agv.battery > 20 ? '#e67e22' : '#c0392b'}}></div>
+                    </div>
+                  </div>
+                  {agv.driver && (
+                    <div className="info-row">
+                      <span className="label">👤 Водитель:</span>
+                      <span className="value">{agv.driver}</span>
+                    </div>
+                  )}
+                  {agv.route_goal && (
+                    <div className="info-row">
+                      <span className="label">🎯 Цель:</span>
+                      <span className="value">
+                        {agv.route_task?.order_id} · {agv.route_task?.sku}
+                      </span>
+                    </div>
+                  )}
+                  {agv.route_task && (
+                    <div className="info-row">
+                      <span className="label">📋 Задача:</span>
+                      <span className="value">
+                         {agv.route_task?.order_id} · {agv.route_task?.sku}
+                     </span>
+                    </div>
+                 )}
+                 {agv.route_task && (
+                   <div className="info-row">
+                     <span className="label">📌 Сегодня:</span>
+                     <span className="value">
+                       1. Забрать {agv.route_task?.sku} из {agv.route_task?.cell_id}<br />
+                       2. Доставить груз по маршруту<br />
+                       3. Следовать указаниям навигации<br />
+                       4. Завершить текущий заказ<br />
+                       5. Ожидать следующую FIFO-задачу
+                     </span>
+                   </div>
+                  )}
+                  {agv.route_path && agv.route_path.length > 0 && (
+                    <div className="info-row">
+                      <span className="label">🛣️ Маршрут:</span>
+                      <span className="value">{agv.route_path.length} шагов</span>
+                    </div>
+                  )}
+                  {agv.route_task?.eta_minutes && (
+                    <div className="info-row">
+                      <span className="label">⏱ ETA:</span>
+                      <span className="value">{agv.route_task.eta_minutes} мин</span>
+                      </div>
+                  )}
+                  {agv.assigned_by && (
+                    <div className="info-row">
+                      <span className="label">👥 Назначено:</span>
+                      <span className="value">{agv.assigned_by}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="no-data">Нет назначенных задач. Ожидание...</div>
+          )}
+        </div>
+        )}
+
         {canViewOperations && (
         <div className="section agv-control">
-          <div className="section-title">Погрузчики с водителями</div>
+          <div className="section-title">Аккаунты погрузчиков</div>
           {operatorMessage && <div className="operator-message">{operatorMessage}</div>}
           {plannerStatus && (
             <div className="planner-strip">
@@ -1373,18 +1615,26 @@ export default function App() {
                   </div>
                 )}
                 <div className="agv-detail">
-                  Батарея {a.battery}% · Цель: C{Math.round(a.tx)}/R{Math.round(a.tz)}
-                  {routeLength ? ` · кратчайший маршрут: ${routeLength} шагов` : ""}
+                  Батарея {a.battery}% · Цель: {a.route_goal ? `C${a.route_goal[0]}/R${a.route_goal[1]}` : `C${Math.round(a.tx)}/R${Math.round(a.tz)}`}
+                  {routeLength ? ` · маршрут ${routeLength} шагов` : ""}
+                </div>
+                <div className="agv-detail" style={{ marginTop: 6, opacity: 0.8 }}>
+                  Назначил: {a.assigned_by || "—"} · Режим: {task?.dispatch_mode === "auto_fifo" ? "Auto FIFO" : a.manual ? "manual" : "standby"}
                 </div>
                 {task ? (
                   <div className="agv-detail" style={{ marginTop: 6, color: "#cfe3ff" }}>
-                    Auto FIFO: {task.order_id} · {task.sku} · {task.cell_id}
-                    {task.expiry_days_left !== null && task.expiry_days_left !== undefined ? ` · exp ${task.expiry_days_left} дн.` : ""}
+                    Задача: {task.order_id} · {task.sku} · {task.cell_id}
+                    {task.expiry_days_left != null ? ` · exp ${task.expiry_days_left} дн.` : ""}
                     {task.eta_minutes ? ` · ETA ${task.eta_minutes} мин` : ""}
                   </div>
                 ) : (
                   <div className="agv-detail" style={{ marginTop: 6, opacity: 0.58 }}>
-                    Нет активной FIFO-задачи
+                    {a.route_goal ? `Цель поставлена: C${a.route_goal[0]}/R${a.route_goal[1]}` : "Нет активной задачи"}
+                  </div>
+                )}
+                {routeLength > 0 && a.route_path?.length > 0 && (
+                  <div className="agv-detail" style={{ marginTop: 6, opacity: 0.72, fontSize: 12 }}>
+                    Как добраться: {a.route_path.slice(0, 8).map(([col, row]) => `C${col}/R${row}`).join(" → ")}{a.route_path.length > 8 ? " …" : ""}
                   </div>
                 )}
                 <div className="agv-actions">

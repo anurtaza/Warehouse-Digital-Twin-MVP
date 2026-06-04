@@ -13,14 +13,21 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { width: 100%; height: 100%; }
 body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; overflow: hidden; }
 
 .layout {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: var(--sidebar-width, 360px) minmax(0, 1fr);
   height: 100vh;
+  height: 100svh;
   width: 100vw;
   overflow: hidden;
+}
+
+.mobile-menu-btn,
+.mobile-sidebar-backdrop {
+  display: none;
 }
 
 /* Sidebar */
@@ -69,6 +76,7 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
   position: relative;
   width: 100%;
   height: 100vh;
+  height: 100svh;
   background: #0f1923;
   overflow: hidden;
 }
@@ -560,3 +568,175 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, sans-s
 .event-time { color: var(--muted); min-width: 42px; white-space: nowrap; }
 .event-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
 .event-msg { color: var(--text); line-height: 1.4; }
+
+/* Forklift driver dashboard */
+.forklift-dashboard { background: linear-gradient(135deg, rgba(255, 140, 0, 0.08) 0%, rgba(255, 165, 0, 0.04) 100%); border: 1px solid rgba(255, 140, 0, 0.2); border-radius: 8px; padding: 16px; }
+.forklift-card { background: var(--card); border: 2px solid rgba(255, 140, 0, 0.4); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.forklift-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 140, 0, 0.2); }
+.forklift-id { font-size: 16px; font-weight: 700; color: #ff8c00; }
+.forklift-status { font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 16px; background: rgba(255, 140, 0, 0.2); color: #ff8c00; }
+.forklift-status.idle { background: rgba(42, 122, 59, 0.2); color: #2a7a3b; }
+.forklift-status.busy { background: rgba(230, 126, 34, 0.2); color: #e67e22; }
+.forklift-status.offline { background: rgba(192, 57, 43, 0.2); color: #c0392b; }
+.forklift-info { display: flex; flex-direction: column; gap: 12px; }
+.battery-section { display: flex; flex-direction: column; gap: 6px; }
+.battery-label { font-size: 14px; font-weight: 600; color: var(--text); }
+.battery-bar-container { display: flex; height: 10px; background: rgba(122, 143, 166, 0.2); border-radius: 5px; overflow: hidden; }
+.battery-bar-fill { height: 100%; transition: width 0.3s ease, background-color 0.3s ease; }
+.info-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.info-row .label { color: var(--muted); min-width: 120px; font-weight: 500; }
+.info-row .value { color: var(--text); flex: 1; word-break: break-word; }
+.no-data { color: var(--muted); font-size: 12px; text-align: center; padding: 20px; }
+
+@media (max-width: 700px) {
+  body {
+    overscroll-behavior: none;
+  }
+
+  .layout {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .viewport {
+    height: 100svh;
+    min-height: 100svh;
+  }
+
+  .mobile-menu-btn {
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    z-index: 70;
+    display: inline-grid;
+    place-content: center;
+    gap: 4px;
+    width: 44px;
+    height: 44px;
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 8px;
+    background: rgba(15,25,35,0.86);
+    color: var(--text);
+    box-shadow: 0 14px 34px rgba(0,0,0,0.34);
+    backdrop-filter: blur(10px);
+  }
+
+  .mobile-menu-btn span {
+    display: block;
+    width: 18px;
+    height: 2px;
+    border-radius: 99px;
+    background: currentColor;
+  }
+
+  .mobile-sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    display: block;
+    border: 0;
+    background: rgba(0,0,0,0.42);
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    width: min(360px, 88vw);
+    max-width: 360px;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    transform: translateX(-104%);
+    transition: transform 0.22s ease;
+    box-shadow: 18px 0 44px rgba(0,0,0,0.42);
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .sidebar-resizer {
+    display: none;
+  }
+
+  .logo {
+    min-height: 68px;
+    padding-left: 64px;
+    padding-right: 14px;
+  }
+
+  .section {
+    padding: 12px 14px;
+  }
+
+  .metrics-grid,
+  .role-grid,
+  .scenario-grid,
+  .planner-strip,
+  .worker-route-grid,
+  .worker-route-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .route-manual {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .route-manual .action-btn {
+    grid-column: 1 / -1;
+  }
+
+  .agv-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .auth-session {
+    grid-template-columns: 1fr;
+  }
+
+  .forklift-card,
+  .forklift-dashboard {
+    padding: 12px;
+  }
+
+  .forklift-header,
+  .info-row {
+    align-items: flex-start;
+  }
+
+  .info-row {
+    display: grid;
+    gap: 4px;
+  }
+
+  .info-row .label {
+    min-width: 0;
+  }
+
+  .tooltip {
+    max-width: calc(100vw - 28px);
+    left: 14px !important;
+    right: 14px;
+    top: auto !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 390px) {
+  .sidebar {
+    width: 92vw;
+  }
+
+  .logo-title {
+    font-size: 13px;
+  }
+
+  .metric-val {
+    font-size: 18px;
+  }
+
+  .worker-route-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -3,9 +3,15 @@ const ROLE_LABELS = {
   operator: "Оператор погрузчиков",
   logistics: "Логист",
   viewer: "Наблюдатель",
+  forklift: "Водитель погрузчика",
 };
 
 export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
+  if (role === "forklift") {
+    // Forklift водители не нуждаются в summary панели - они видят кабину
+    return null;
+  }
+  
   if (!metrics || !insights || !wms) return null;
 
   const summary = {
@@ -45,6 +51,15 @@ export default function RoleSummaryPanel({ role, metrics, insights, wms }) {
         { label: "Заполняемость", value: `${metrics.fill_pct}%` },
         { label: "Погрузчики онлайн", value: `${metrics.agv_active}/${metrics.agv_total}` },
         { label: "Сценарий", value: metrics.scenario },
+      ],
+    },
+    forklift: {
+      title: "Кабина погрузчика",
+      detail: "Просмотр текущего задания, маршрута и статуса батареи.",
+      cards: [
+        { label: "Модель", value: "AGV Класс-A" },
+        { label: "Станция", value: "Активна" },
+        { label: "Версия ПО", value: "2.1" },
       ],
     },
   }[role] || {
