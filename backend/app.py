@@ -24,16 +24,25 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 sim = WarehouseSimulator(cols=10, rows=6, shelves=4)
 
 # Simple in-memory users (replace with real user store in production)
+AUTH_ROLES = (
+    "warehouse-clerk",
+    "viewer",
+    "supervisor",
+    "operator",
+    "operational-manager",
+    "manager",
+    "senior-warehouse-clerk",
+    "logistics",
+    "forklift-operator",
+    "forklift",
+)
+
 USERS = {
-    "operator": {"password": "operatorpass", "role": "operator"},
-    "manager": {"password": "managerpass", "role": "manager"},
-    "logistics": {"password": "logisticspass", "role": "logistics"},
-    "viewer": {"password": "viewerpass", "role": "viewer"},
-    # Аккаунты для каждого погрузчика — водители логинятся и видят только СВОИ цели/маршруты
-    "forklift-0": {"password": "forklift0pass", "role": "forklift", "agv_id": 0},
-    "forklift-1": {"password": "forklift1pass", "role": "forklift", "agv_id": 1},
-    "forklift-2": {"password": "forklift2pass", "role": "forklift", "agv_id": 2},
-    "forklift-3": {"password": "forklift3pass", "role": "forklift", "agv_id": 3},
+    "operational-manager": {"password": "operationalmanagerpass", "role": "operational-manager"},
+    "supervisor": {"password": "supervisorpass", "role": "supervisor"},
+    "warehouse-clerk": {"password": "warehouseclerkpass", "role": "warehouse-clerk"},
+    "senior-warehouse-clerk": {"password": "seniorwarehouseclerkpass", "role": "senior-warehouse-clerk"},
+    "forklift-operator": {"password": "forkliftoperatorpass", "role": "forklift-operator", "agv_id": 0},
 }
 
 def requires_role(*roles):
@@ -78,7 +87,7 @@ def login():
 
 
 @app.route("/api/me")
-@requires_role("viewer", "operator", "manager", "logistics", "forklift")
+@requires_role(*AUTH_ROLES)
 def me():
     return jsonify(request.user)
 
@@ -143,7 +152,7 @@ def get_events():
 
 
 @app.route("/api/scenario/<name>", methods=["POST"])
-@requires_role("manager")
+@requires_role("operational-manager", "manager")
 def set_scenario(name):
     valid = ["normal", "surge", "agv_fail", "low_staff"]
     if name not in valid:
@@ -158,7 +167,7 @@ def set_scenario(name):
 
 
 @app.route("/api/optimize", methods=["POST"])
-@requires_role("manager")
+@requires_role("operational-manager", "manager")
 def optimize_placement():
     sim.optimize_placement()
     state = sim.get_state()
@@ -174,7 +183,7 @@ def get_wms():
 
 
 @app.route("/api/agv/<int:agv_id>/command", methods=["POST"])
-@requires_role('operator','manager')
+@requires_role('operational-manager','manager')
 def agv_command(agv_id):
     data = request.get_json(force=True) if request.data else {}
     cmd = data.get("cmd")
@@ -197,7 +206,7 @@ def agv_command(agv_id):
 
 
 @app.route('/api/planner/assign', methods=['POST'])
-@requires_role('operator','manager')
+@requires_role('operational-manager','manager')
 def planner_assign():
     data = request.get_json(force=True) if request.data else {}
     agv_id = data.get('agv_id')
@@ -223,7 +232,7 @@ def planner_assign():
 
 
 @app.route('/api/worker/route', methods=['POST'])
-@requires_role('operator', 'manager', 'logistics')
+@requires_role('operational-manager', 'manager', 'senior-warehouse-clerk', 'logistics', 'supervisor')
 def worker_route():
     data = request.get_json(force=True) if request.data else {}
     start = data.get("start", {})

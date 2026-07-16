@@ -1,0 +1,20 @@
+services:
+  - type: web_service
+    name: warehouse-digital-twin-backend
+    env: python
+    branch: main
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && python app.py
+    envVars:
+      - key: JWT_SECRET
+        value: warehouse-twin-secret
+
+  - type: static_site
+    name: warehouse-digital-twin-frontend
+    branch: main
+    buildCommand: cd frontend && npm ci && npm run build
+    publishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://your-backend-service.onrender.com
+        sync: false

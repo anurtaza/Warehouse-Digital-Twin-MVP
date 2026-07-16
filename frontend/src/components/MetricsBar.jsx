@@ -2,9 +2,23 @@ export default function MetricsBar({ metrics }) {
   const alertColor = metrics.hot_zones >= 5 ? "#c0392b" : metrics.hot_zones >= 3 ? "#e67e22" : "#27ae60";
   const fillDelta = metrics.benchmarks?.fill_delta ?? 0;
   const throughputDelta = metrics.benchmarks?.throughput_delta ?? 0;
+  const healthScore = Math.max(60, Math.min(100, 100 - (metrics.hot_zones || 0) * 4 - (metrics.congestion_points || 0) * 3 + (metrics.benchmarks?.fifo_compliance >= 95 ? 5 : 0)));
+  const healthReasons = [
+    metrics.benchmarks?.fifo_compliance >= 95 ? "Good FIFO" : "FIFO drift",
+    metrics.hot_zones >= 3 ? "High congestion" : "Balanced flow",
+    metrics.pending_orders >= 10 ? "Two delayed trucks" : "Stable dispatch",
+  ];
+
   return (
     <div className="section">
-      <div className="section-title">Метрики в реальном времени</div>
+      <div className="section-title">Warehouse health</div>
+      <div className="health-card">
+        <div className="health-score">{healthScore}<span>/100</span></div>
+        <div className="health-copy">Warehouse Health</div>
+        <div className="health-reasons">
+          {healthReasons.map((reason) => <span key={reason}>{reason}</span>)}
+        </div>
+      </div>
       <div className="metrics-grid">
         <div className="metric">
           <div className="metric-label">Заполненность</div>
