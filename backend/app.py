@@ -4,7 +4,7 @@ Digital Twin Warehouse — Flask + SocketIO backend
 """
 import eventlet
 eventlet.monkey_patch()
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_socketio import SocketIO
 from flask_cors import CORS
 import os
@@ -16,7 +16,8 @@ from simulator import WarehouseSimulator
 from planner import planner
 
 
-app = Flask(__name__)
+dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+app = Flask(__name__, static_folder=dist_dir, static_url_path="")
 app.config["SECRET_KEY"] = os.environ.get("JWT_SECRET", "warehouse-twin-secret")
 CORS(app, origins="*")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
@@ -90,6 +91,14 @@ def login():
 @requires_role(*AUTH_ROLES)
 def me():
     return jsonify(request.user)
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_frontend(path):
+    if path != "" and os.path.exists(os.path.join(dist_dir, path)):
+        return send_from_directory(dist_dir, path)
+    return send_from_directory(dist_dir, 'index.html')
 
 
 # ─── REST endpoints ────────────────────────────────────────────────
