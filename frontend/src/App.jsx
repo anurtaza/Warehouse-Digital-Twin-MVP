@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { io } from "socket.io-client";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
@@ -33,7 +33,14 @@ export default function App() {
   const [role, setRole] = useState("manager");
   const [connected, setConnected] = useState(false);
   const [tooltip, setTooltip] = useState(null);
+  const [warehouseCells, setWarehouseCells] = useState([]);
   const [selectedAgv, setSelectedAgv] = useState(0);
+  const [selectedPallet, setSelectedPallet] = useState(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [heatMapMode, setHeatMapMode] = useState(false);
+  const [showSimulation, setShowSimulation] = useState(false);
+  const [simulationScenario, setSimulationScenario] = useState("forklift_breakdown");
+  const [simulationResult, setSimulationResult] = useState(null);
   const [routeTarget, setRouteTarget] = useState({ col: 0, row: 0 });
   const [workerRoute, setWorkerRoute] = useState(null);
   const [workerRouteForm, setWorkerRouteForm] = useState({
@@ -50,6 +57,7 @@ export default function App() {
   const raycasterRef = useRef(new THREE.Raycaster());
   const pointerRef = useRef(new THREE.Vector2());
   const selectedAgvRef = useRef(0);
+  const selectedPalletRef = useRef(null);
   const routeEditModeRef = useRef(false);
   const assignRouteRef = useRef(null);
 
@@ -58,19 +66,44 @@ export default function App() {
   const tokenRef = useRef(null);
   const [userRole, setUserRole] = useState(null);
   const userRoleRef = useRef(null);
-  const [loginUser, setLoginUser] = useState("forklift-0");
-  const [loginPass, setLoginPass] = useState("forklift0pass");
+  const [loginUser, setLoginUser] = useState("operational-manager");
+  const [loginPass, setLoginPass] = useState("operationalmanagerpass");
 
-  const activeRole = userRole || "viewer";
-  const canOperate = activeRole === "operator" || activeRole === "manager";
-  const canManage = activeRole === "manager";
-  const isLogistics = activeRole === "logistics";
-  const isForklift = activeRole === "forklift";
-  const canViewOperations = canOperate || canManage;
-  const canViewPlanning = canManage || isLogistics;
-  const canViewWms = canManage || isLogistics;
-  const canViewInsights = canManage || activeRole === "operator";
-  const canPlanWorkerRoute = activeRole === "operator" || activeRole === "manager" || activeRole === "logistics";
+  const activeRole = userRole || "warehouse-clerk";
+  const normalizedRole = activeRole.toLowerCase();
+  const isOperationalManager = normalizedRole === "operational-manager" || normalizedRole === "manager";
+  const isSupervisor = normalizedRole === "supervisor" || normalizedRole === "operator";
+  const isWarehouseClerk = normalizedRole === "warehouse-clerk" || normalizedRole === "viewer";
+  const isSeniorWarehouseClerk = normalizedRole === "senior-warehouse-clerk" || normalizedRole === "logistics";
+  const isForklift = normalizedRole === "forklift-operator" || normalizedRole === "forklift";
+  const canOperate = isOperationalManager || isSupervisor || isForklift;
+  const canManage = isOperationalManager;
+  const canViewOperations = canOperate || canManage || isSeniorWarehouseClerk || isWarehouseClerk;
+  const canViewPlanning = canManage || isSeniorWarehouseClerk || isSupervisor;
+  const canViewWms = canManage || isSeniorWarehouseClerk || isSupervisor;
+  const canViewInsights = canManage || isSupervisor || isOperationalManager;
+  const canPlanWorkerRoute = isSupervisor || canManage || isSeniorWarehouseClerk;
+
+  const alertItems = useMemo(() => {
+    const items = [];
+    if (metrics?.hot_zones) {
+      items.push({ id: "alert-hot-zones", title: `${metrics.hot_zones} blocked pallets`, detail: "Action needed in zone B", severity: "high", action: "focusBlocked" });
+    }
+    if (metrics?.congestion_points) {
+      items.push({ id: "alert-congestion", title: `Congestion near Dock ${metrics.congestion_points > 1 ? 2 : 1}`, detail: "Route flow is tightening", severity: "medium", action: "focusDock" });
+    }
+    if (metrics?.pending_orders) {
+      items.push({ id: "alert-orders", title: `${metrics.pending_orders} orders pending`, detail: "Priority release window opening", severity: "medium", action: "focusDock" });
+    }
+    if (agvsList?.length) {
+      const online = agvsList.filter((agv) => agv.battery > 0).length;
+      items.push({ id: "alert-forklifts", title: `${online} forklifts online`, detail: "One operator is monitoring queue pressure", severity: "low", action: "focusFleet" });
+    }
+    if (insights?.recommendations?.length) {
+      items.push({ id: "alert-recommendation", title: insights.recommendations[0], detail: "Suggested by TwinStock", severity: "low", action: "focusRecommendation" });
+    }
+    return items.slice(0, 4);
+  }, [metrics, insights, agvsList]);
 
   const authHeaders = (extra = {}) => {
     const headers = { ...extra };
@@ -105,8 +138,8 @@ export default function App() {
     socket.on("disconnect", () => setConnected(false));
 
     socket.on("state", (data) => {
-      // Forklift водители видят только свого AGV, не получают WMS
-      if (activeRole === "forklift") {
+      // Forklift operators see only their own AGV and do not receive WMS details
+      if (normalizedRole === "forklift-operator" || normalizedRole === "forklift") {
         setMetrics(null);
         setInsights(null);
         setAnalysis(null);
@@ -121,6 +154,7 @@ export default function App() {
       }
       setPlannerStatus(data.planner);
       setScenarioState(data.scenario);
+      setWarehouseCells(data.cells || []);
       updateScene(data);
       setAgvsList(data.agvs || []);
     });
@@ -132,8 +166,8 @@ export default function App() {
     fetch(`${API}/state`)
       .then((res) => res.json())
       .then((data) => {
-        // Forklift водители видят только своего AGV
-        if (userRole === "forklift") {
+        // Forklift operators see only their own AGV
+        if ((userRole || "").toLowerCase() === "forklift-operator" || (userRole || "").toLowerCase() === "forklift") {
           setMetrics(null);
           setInsights(null);
           setAnalysis(null);
@@ -170,6 +204,9 @@ export default function App() {
   useEffect(() => {
     selectedAgvRef.current = selectedAgv;
   }, [selectedAgv]);
+  useEffect(() => {
+    selectedPalletRef.current = selectedPallet;
+  }, [selectedPallet]);
   useEffect(() => {
     routeEditModeRef.current = routeEditMode;
   }, [routeEditMode]);
@@ -319,6 +356,7 @@ export default function App() {
       routeLines: {},
       workerRouteLine: null,
       workerRouteMarkers: [],
+      cameraFocus: null,
     };
 
     const onPointerMove = (event) => {
@@ -362,23 +400,57 @@ export default function App() {
     };
 
     const onCanvasClick = (event) => {
-      if (!routeEditModeRef.current) return;
       const rect = renderer.domElement.getBoundingClientRect();
       pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycasterRef.current.setFromCamera(pointerRef.current, camera);
 
       const cellObjects = Object.values(sceneRef.current.cellMeshes);
-      const intersects = raycasterRef.current.intersectObjects(cellObjects, true);
+      const agvObjects = Object.values(sceneRef.current.agvMeshes).map((entry) => entry.group);
+      const intersects = raycasterRef.current.intersectObjects([...cellObjects, ...agvObjects], true);
       if (!intersects.length) return;
 
       const target = intersects[0].object.userData || intersects[0].object.parent?.userData;
-      if (target?.type !== "cell") return;
+      if (!target) return;
 
-      const cell = target.data;
-      setOperatorMessage(`Планирование маршрута погрузчика-${selectedAgvRef.current} → ${cell.id}...`);
-      setRouteTarget({ col: cell.col, row: cell.row });
-      assignRouteRef.current?.(selectedAgvRef.current, cell.col, cell.row, cell.id);
+      if (routeEditModeRef.current && target.type === "cell") {
+        const cell = target.data;
+        setOperatorMessage(`Планирование маршрута погрузчика-${selectedAgvRef.current} → ${cell.id}...`);
+        setRouteTarget({ col: cell.col, row: cell.row });
+        assignRouteRef.current?.(selectedAgvRef.current, cell.col, cell.row, cell.id);
+        return;
+      }
+
+      if (target.type === "cell") {
+        const cell = target.data;
+        const pallet = {
+          id: `PL-${cell.id}`,
+          cellId: cell.id,
+          sku: cell.sku || "Empty slot",
+          batch: `B-${String(cell.col + cell.row + 1).padStart(2, "0")}`,
+          destinationDock: cell.zone_type === "cold" ? "Dock 3" : cell.zone_type === "dry" ? "Dock 1" : "Dock 2",
+          currentZone: cell.zone_label || cell.zone_type || "ambient",
+          stackLevel: cell.shelf + 1,
+          status: cell.fill ? (cell.hot ? "Blocked" : "Ready") : "Empty",
+          lastMovement: cell.activity_count > 0 ? `${Math.max(2, 14 - cell.activity_count)} min ago` : "No movement",
+          operator: cell.hot ? "M. Silva" : "A. Chen",
+          col: cell.col,
+          row: cell.row,
+        };
+        setSelectedPallet(pallet);
+        setSelectedAgv(0);
+        focusOnCell(cell);
+        setOperatorMessage(`Focused pallet ${pallet.id} in ${pallet.currentZone}`);
+        return;
+      }
+
+      if (target.type === "agv") {
+        const agv = target.data;
+        setSelectedAgv(agv.id);
+        setSelectedPallet(null);
+        focusOnAgv(agv);
+        setOperatorMessage(`Forklift ${agv.id} selected for operator review`);
+      }
     };
 
     renderer.domElement.addEventListener("pointermove", onPointerMove);
@@ -399,6 +471,14 @@ export default function App() {
     const animate = () => {
       raf = requestAnimationFrame(animate);
       animTime += 0.016;
+      if (sceneRef.current.cameraFocus) {
+        const focus = sceneRef.current.cameraFocus;
+        camera.position.lerp(focus.position, 0.08);
+        controls.target.lerp(focus.target, 0.08);
+        if (camera.position.distanceTo(focus.position) < 0.15 && controls.target.distanceTo(focus.target) < 0.15) {
+          sceneRef.current.cameraFocus = null;
+        }
+      }
       controls.update();
       const { agvMeshes } = sceneRef.current;
       Object.values(agvMeshes || {}).forEach((entry) => {
@@ -466,6 +546,7 @@ export default function App() {
 
     const COLORS = { empty: 0x233142, full: 0x1a5fa5, hot: 0xc0392b };
     const ZONE_COLORS = { cold: 0x27d4ff, ambient: 0x1a5fa5, dry: 0xd9a441 };
+    const isSelectedCell = (cell) => selectedPalletRef.current?.cellId === cell.id;
 
     // Update / create cell boxes
     data.cells.forEach((cell) => {
@@ -500,17 +581,22 @@ export default function App() {
       const pallet = palletMeshes[key];
       const activity = Math.min((cell.activity_count || 0) / 24, 1);
       const zoneColor = ZONE_COLORS[cell.zone_type] || COLORS.full;
+      const selected = isSelectedCell(cell);
+      const heatLevel = heatMapMode ? Math.min(1, activity * 1.25) : activity;
       mesh.position.set(bx, by, bz);
       mesh.visible = true;
       mesh.material.color.setHex(cell.fill ? (cell.expiry_risk ? 0xf39c12 : zoneColor) : zoneColor);
-      mesh.material.opacity = cell.fill ? Math.min(1, 0.78 + activity * 0.22) : 0.16;
-      mesh.material.emissive?.setHex(cell.hot || activity > 0.65 ? 0x5a2200 : 0x000000);
-      mesh.material.emissiveIntensity = cell.hot || activity > 0.65 ? 0.28 + activity * 0.45 : 0;
+      mesh.material.opacity = cell.fill ? Math.min(1, 0.2 + heatLevel * 0.6) : 0.16;
+      mesh.material.emissive?.setHex(selected ? 0x4a90e2 : cell.hot || heatLevel > 0.65 ? 0x5a2200 : 0x000000);
+      mesh.material.emissiveIntensity = selected ? 0.42 : cell.hot || heatLevel > 0.65 ? 0.28 + heatLevel * 0.45 : 0;
+      mesh.scale.set(selected ? 1.08 : 1, selected ? 1.08 : 1, selected ? 1.08 : 1);
       mesh.userData.data = cell;
 
       pallet.position.set(bx, by + 0.28, bz);
       pallet.visible = cell.fill;
-      pallet.material.color.setHex(cell.expiry_risk ? 0xf39c12 : cell.hot ? 0xe74c3c : 0x8d6e63);
+      pallet.material.color.setHex(selected ? 0x7fb6ff : cell.expiry_risk ? 0xf39c12 : cell.hot ? 0xe74c3c : 0x8d6e63);
+      pallet.material.emissive?.setHex(selected ? 0x4a90e2 : 0x000000);
+      pallet.material.emissiveIntensity = selected ? 0.3 : 0;
     });
 
     const TOTAL_W = COLS * (CW + GAP_X);
@@ -949,6 +1035,124 @@ export default function App() {
     setAgvsList(data.agvs || []);
   }, []);
 
+  const focusOnCell = useCallback((cell) => {
+    if (!sceneRef.current?.camera || !sceneRef.current?.controls) return;
+    const COLS = 10;
+    const ROWS = 6;
+    const CW = 2.0;
+    const CD = 1.6;
+    const GAP_X = 0.5;
+    const GAP_Z = 1.4;
+    const OX = -(COLS * (CW + GAP_X)) / 2 + CW / 2;
+    const OZ = -(ROWS * (CD + GAP_Z)) / 2 + CD / 2;
+    const target = new THREE.Vector3(
+      OX + cell.col * (CW + GAP_X),
+      5.2,
+      OZ + cell.row * (CD + GAP_Z)
+    );
+    const lookAt = new THREE.Vector3(
+      OX + cell.col * (CW + GAP_X),
+      1.1,
+      OZ + cell.row * (CD + GAP_Z)
+    );
+    sceneRef.current.cameraFocus = { position: target.clone().add(new THREE.Vector3(6, 4.2, 6)), target: lookAt };
+  }, []);
+
+  const focusOnAgv = useCallback((agv) => {
+    if (!sceneRef.current?.camera || !sceneRef.current?.controls) return;
+    const COLS = 10;
+    const ROWS = 6;
+    const CW = 2.0;
+    const CD = 1.6;
+    const GAP_X = 0.5;
+    const GAP_Z = 1.4;
+    const OX = -(COLS * (CW + GAP_X)) / 2 + CW / 2;
+    const OZ = -(ROWS * (CD + GAP_Z)) / 2 + CD / 2;
+    const target = new THREE.Vector3(
+      OX + agv.x * (CW + GAP_X),
+      4.4,
+      OZ + agv.z * (CD + GAP_Z)
+    );
+    sceneRef.current.cameraFocus = { position: target.clone().add(new THREE.Vector3(3.7, 3.2, 3.7)), target: target.clone().add(new THREE.Vector3(0, 0, 0)) };
+  }, []);
+
+  const handleSearch = (event) => {
+    event.preventDefault();
+    const term = searchTerm.trim().toLowerCase();
+    if (!term) return;
+
+    const byCell = warehouseCells.find((cell) => cell.id?.toLowerCase().includes(term) || cell.sku?.toLowerCase().includes(term));
+    if (byCell) {
+      const pallet = {
+        id: `PL-${byCell.id}`,
+        cellId: byCell.id,
+        sku: byCell.sku || "Empty slot",
+        batch: `B-${String(byCell.col + byCell.row + 1).padStart(2, "0")}`,
+        destinationDock: byCell.zone_type === "cold" ? "Dock 3" : byCell.zone_type === "dry" ? "Dock 1" : "Dock 2",
+        currentZone: byCell.zone_label || byCell.zone_type || "ambient",
+        stackLevel: byCell.shelf + 1,
+        status: byCell.fill ? (byCell.hot ? "Blocked" : "Ready") : "Empty",
+        lastMovement: `${Math.max(2, 14 - (byCell.activity_count || 0))} min ago`,
+        operator: byCell.hot ? "M. Silva" : "A. Chen",
+        col: byCell.col,
+        row: byCell.row,
+      };
+      setSelectedPallet(pallet);
+      focusOnCell(byCell);
+      setOperatorMessage(`Search result: ${pallet.id} in ${pallet.currentZone}`);
+      return;
+    }
+
+    const byAgv = agvsList.find((agv) => String(agv.id).includes(term) || agv.driver?.toLowerCase().includes(term) || agv.route_task?.sku?.toLowerCase().includes(term));
+    if (byAgv) {
+      setSelectedAgv(byAgv.id);
+      focusOnAgv(byAgv);
+      setOperatorMessage(`Search result: forklift ${byAgv.id}`);
+      return;
+    }
+
+    const byEvent = events.find((ev) => ev.msg?.toLowerCase().includes(term));
+    if (byEvent) {
+      setOperatorMessage(`Matched event: ${byEvent.msg}`);
+      return;
+    }
+
+    setOperatorMessage(`No match found for “${searchTerm}”`);
+  };
+
+  const runSimulation = () => {
+    const scenarios = {
+      forklift_breakdown: {
+        loadingTime: "28 → 36 min",
+        congestion: "Low → High",
+        occupancy: "82 → 91%",
+        recommendation: "Reassign pallet #5421 to B-04 for Dock 2 access",
+      },
+      demand_spike: {
+        loadingTime: "26 → 41 min",
+        congestion: "Low → Severe",
+        occupancy: "80 → 94%",
+        recommendation: "Open the temporary dock and rebalance pallets",
+      },
+      zone_closure: {
+        loadingTime: "24 → 33 min",
+        congestion: "Medium → High",
+        occupancy: "79 → 88%",
+        recommendation: "Move cold pallets closer to Dock 3",
+      },
+      temporary_dock: {
+        loadingTime: "27 → 24 min",
+        congestion: "Medium → Low",
+        occupancy: "81 → 85%",
+        recommendation: "Keep the temporary dock active for the next hour",
+      },
+    };
+    const next = scenarios[simulationScenario] || scenarios.forklift_breakdown;
+    setSimulationResult(next);
+    setShowSimulation(true);
+    setOperatorMessage(`Simulation completed: ${next.recommendation}`);
+  };
+
   const assignRoute = (agvId, col, row, label = `C${col}/R${row}`) => {
     if (!canOperate) {
       setOperatorMessage("Маршрут может назначать только operator или manager.");
@@ -986,6 +1190,8 @@ export default function App() {
           setReport(state.report);
           setWms(state.wms);
           setPlannerStatus(state.planner);
+          setWarehouseCells(state.cells || []);
+          setWarehouseCells(state.cells || []);
           updateScene(state);
           setAgvsList(state.agvs || []);
         }
@@ -996,6 +1202,11 @@ export default function App() {
   useEffect(() => {
     assignRouteRef.current = assignRoute;
   }, [assignRoute]);
+
+  useEffect(() => {
+    if (!warehouseCells.length && !agvsList.length) return;
+    updateScene({ cells: warehouseCells, agvs: agvsList });
+  }, [heatMapMode, selectedPallet, selectedAgv, warehouseCells, agvsList, updateScene]);
 
   const gridToWorld = (col, row, y = 0.34) => {
     const COLS = 10;
@@ -1210,6 +1421,7 @@ export default function App() {
           setWms(data.state.wms);
           setPlannerStatus(data.state.planner);
           setScenarioState(data.state.scenario);
+          setWarehouseCells(data.state.cells || []);
           updateScene(data.state);
           setAgvsList(data.state.agvs || []);
         }
@@ -1305,6 +1517,31 @@ export default function App() {
     window.addEventListener("pointerup", onUp);
   };
 
+  useEffect(() => {
+    if (!metrics && !insights) return;
+    const demoTimer = window.setTimeout(() => {
+      setSelectedPallet({
+        id: "PL-A3-18",
+        cellId: "A3-S1",
+        sku: "Cola Zero",
+        batch: "B-09",
+        destinationDock: "Dock 2",
+        currentZone: "Ambient zone",
+        stackLevel: 2,
+        status: "Blocked",
+        lastMovement: "18 min ago",
+        operator: "M. Silva",
+        col: 0,
+        row: 2,
+      });
+      setShowSimulation(true);
+      setSimulationScenario("forklift_breakdown");
+      setSimulationResult({ loadingTime: "28 → 36 min", congestion: "Low → High", occupancy: "82 → 91%", recommendation: "Move pallet #5421 to B-04 for Dock 2 access" });
+      setOperatorMessage("Guided demo: delay detected and TwinStock recommended a better placement.");
+    }, 1400);
+    return () => window.clearTimeout(demoTimer);
+  }, [metrics, insights]);
+
   return (
     <div className="layout" style={{ "--sidebar-width": `${sidebarWidth}px` }}>
       <button
@@ -1359,23 +1596,25 @@ export default function App() {
               <select value={loginUser} onChange={(e) => {
                 const value = e.target.value;
                 setLoginUser(value);
-                // Для погрузчиков пароль = forkliftXpass, для остальных = userpass
-                const pass = value.startsWith("forklift") 
-                  ? `${value.replace("-", "")}pass` 
-                  : `${value}pass`;
-                setLoginPass(pass);
+                const passwordByUser = {
+                  "operational-manager": "operationalmanagerpass",
+                  "supervisor": "supervisorpass",
+                  "warehouse-clerk": "warehouseclerkpass",
+                  "senior-warehouse-clerk": "seniorwarehouseclerkpass",
+                  "forklift-operator": "forkliftoperatorpass",
+                };
+                setLoginPass(passwordByUser[value] || `${value}pass`);
               }}>
-                <optgroup label="Администратор">
-                  <option value="manager">manager</option>
-                  <option value="operator">operator</option>
-                  <option value="logistics">logistics</option>
-                  <option value="viewer">viewer</option>
+                <optgroup label="Операционный контроль">
+                  <option value="operational-manager">Операционный менеджер</option>
+                  <option value="supervisor">Супервайзер</option>
                 </optgroup>
-                <optgroup label="Водители погрузчиков">
-                  <option value="forklift-0">forklift-0</option>
-                  <option value="forklift-1">forklift-1</option>
-                  <option value="forklift-2">forklift-2</option>
-                  <option value="forklift-3">forklift-3</option>
+                <optgroup label="Складская команда">
+                  <option value="senior-warehouse-clerk">Старший кладовщик</option>
+                  <option value="warehouse-clerk">Кладовщик</option>
+                </optgroup>
+                <optgroup label="Погрузчики">
+                  <option value="forklift-operator">Оператор погрузчика</option>
                 </optgroup>
               </select>
               <input value={loginPass} onChange={(e) => setLoginPass(e.target.value)} type="password" />
@@ -1384,9 +1623,94 @@ export default function App() {
           )}
         </div>
 
+        <div className="section">
+          <div className="section-title">Operations center</div>
+          <form className="search-shell" onSubmit={handleSearch}>
+            <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search pallet, SKU, truck, forklift" />
+            <button type="submit" className="action-btn compact">Find</button>
+          </form>
+          <div className="alert-strip">
+            {alertItems.map((item) => (
+              <button key={item.id} type="button" className={`alert-pill ${item.severity}`} onClick={() => {
+                if (item.action === "focusRecommendation") {
+                  setOperatorMessage(item.title);
+                } else if (item.action === "focusFleet") {
+                  setSelectedAgv(agvsList[0]?.id || 0);
+                } else {
+                  setSelectedPallet({
+                    id: "PL-OPS-01",
+                    cellId: "B4-S2",
+                    sku: "Sprite",
+                    batch: "B-14",
+                    destinationDock: "Dock 2",
+                    currentZone: "Ambient zone",
+                    stackLevel: 3,
+                    status: "Blocked",
+                    lastMovement: "11 min ago",
+                    operator: "J. Kim",
+                    col: 1,
+                    row: 3,
+                  });
+                }
+              }}>
+                <span className="alert-icon">{item.severity === "high" ? "●" : item.severity === "medium" ? "◐" : "◌"}</span>
+                <span>{item.title}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {metrics && <MetricsBar metrics={metrics} />}
         <RolePanel role={activeRole} />
         <RoleSummaryPanel role={activeRole} metrics={metrics} insights={insights} wms={wms} />
+
+        {selectedPallet && (
+          <div className="section pallet-focus-card">
+            <div className="section-title">Selected pallet</div>
+            <div className="pallet-card-title">{selectedPallet.id}</div>
+            <div className="pallet-card-grid">
+              <div><span className="pallet-label">SKU</span><strong>{selectedPallet.sku}</strong></div>
+              <div><span className="pallet-label">Batch</span><strong>{selectedPallet.batch}</strong></div>
+              <div><span className="pallet-label">Dock</span><strong>{selectedPallet.destinationDock}</strong></div>
+              <div><span className="pallet-label">Zone</span><strong>{selectedPallet.currentZone}</strong></div>
+              <div><span className="pallet-label">Stack</span><strong>Level {selectedPallet.stackLevel}</strong></div>
+              <div><span className="pallet-label">Status</span><strong>{selectedPallet.status}</strong></div>
+              <div><span className="pallet-label">Last movement</span><strong>{selectedPallet.lastMovement}</strong></div>
+              <div><span className="pallet-label">Operator</span><strong>{selectedPallet.operator}</strong></div>
+            </div>
+          </div>
+        )}
+
+        {selectedAgv && agvsList.find((agv) => agv.id === selectedAgv) && (
+          <div className="section forklift-focus-card">
+            <div className="section-title">Forklift details</div>
+            {(() => {
+              const agv = agvsList.find((entry) => entry.id === selectedAgv);
+              return (
+                <>
+                  <div className="forklift-focus-title">Forklift #{agv.id}</div>
+                  <div className="pallet-card-grid">
+                    <div><span className="pallet-label">Operator</span><strong>{agv.driver}</strong></div>
+                    <div><span className="pallet-label">Battery</span><strong>{agv.battery}%</strong></div>
+                    <div><span className="pallet-label">Speed</span><strong>{Math.max(1, Math.round((agv.battery / 100) * 8))} m/s</strong></div>
+                    <div><span className="pallet-label">Current task</span><strong>{agv.route_task?.sku || "Idle"}</strong></div>
+                    <div><span className="pallet-label">Current load</span><strong>{agv.route_task?.qty || 0} pallet</strong></div>
+                    <div><span className="pallet-label">ETA</span><strong>{agv.route_task?.eta_minutes || 0} min</strong></div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
+        <div className="section">
+          <div className="section-title">Warehouse view</div>
+          <div className="toggle-group">
+            <button type="button" className={`toggle-btn ${!heatMapMode ? "active" : ""}`} onClick={() => setHeatMapMode(false)}>Normal view</button>
+            <button type="button" className={`toggle-btn ${heatMapMode ? "active" : ""}`} onClick={() => setHeatMapMode(true)}>Heat map</button>
+          </div>
+          <button type="button" className="action-btn secondary" onClick={() => setShowSimulation(true)}>Run what-if</button>
+        </div>
 
         {canPlanWorkerRoute && (
         <div className="section worker-route-panel">
@@ -1668,6 +1992,38 @@ export default function App() {
       </aside>
 
       <main className="viewport" ref={mountRef}>
+        <div className="ops-banner">
+          <div className="ops-banner-title">TwinStock command center</div>
+          <div className="ops-banner-subtitle">Live warehouse operations · guided supervisor workflows</div>
+          <div className="ops-banner-actions">
+            <button type="button" className="action-btn compact" onClick={() => setShowSimulation(true)}>What-if</button>
+            <button type="button" className="action-btn secondary compact" onClick={() => setHeatMapMode((value) => !value)}>{heatMapMode ? "Heat map on" : "Heat map off"}</button>
+          </div>
+        </div>
+        {simulationResult && showSimulation && (
+          <div className="simulation-modal">
+            <div className="simulation-card">
+              <div className="section-title">What-if simulation</div>
+              <select value={simulationScenario} onChange={(e) => setSimulationScenario(e.target.value)}>
+                <option value="forklift_breakdown">Forklift breakdown</option>
+                <option value="demand_spike">+30% demand</option>
+                <option value="zone_closure">Close warehouse zone</option>
+                <option value="temporary_dock">Add temporary loading dock</option>
+              </select>
+              <button type="button" className="action-btn" onClick={runSimulation}>Run simulation</button>
+              {simulationResult && (
+                <div className="simulation-result">
+                  <div className="simulation-row"><span>Current KPI</span><strong>Loading time 28 min</strong></div>
+                  <div className="simulation-row"><span>Predicted KPI</span><strong>Loading time {simulationResult.loadingTime}</strong></div>
+                  <div className="simulation-row"><span>Congestion</span><strong>{simulationResult.congestion}</strong></div>
+                  <div className="simulation-row"><span>Occupancy</span><strong>{simulationResult.occupancy}</strong></div>
+                  <div className="simulation-recommendation">{simulationResult.recommendation}</div>
+                </div>
+              )}
+              <button type="button" className="action-btn secondary" onClick={() => setShowSimulation(false)}>Close</button>
+            </div>
+          </div>
+        )}
         {tooltip && (
           <div className="tooltip" style={{ left: tooltip.x + 14, top: tooltip.y + 14 }}>
             <div className="tooltip-title">{tooltip.title}</div>
